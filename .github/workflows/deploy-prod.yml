@@ -184,8 +184,8 @@ jobs:
   deployment-preparation:
     name: Deployment Preparation
     runs-on: ubuntu-latest
-    needs: [pre-production-validation, production-approval, database-backup]
-    if: always() && needs.production-approval.result == 'success'
+    needs: [pre-production-validation, production-ready, database-backup]
+    if: always() && (needs.database-backup.result == 'success' || needs.database-backup.result == 'skipped')
     outputs:
       backend_image: ${{ steps.images.outputs.backend_image }}
       frontend_version: ${{ steps.images.outputs.frontend_version }}
@@ -252,7 +252,10 @@ jobs:
   deploy-production-backend:
     name: Deploy Backend to Production
     runs-on: ubuntu-latest
-    needs: [pre-production-validation, production-ready, deployment-preparation]
+    needs: [pre-production-validation, production-ready, database-backup, deployment-preparation]
+    if: always() && (needs.database-backup.result == 'success' || needs.database-backup.result == 'skipped') && needs.deployment-preparation.result == 'success'
+    outputs:
+      backend_url: ${{ steps.verify.outputs.backend_url }}
     # Solo developer - no environment protection needed
     # environment: production-backend
 
@@ -269,7 +272,8 @@ jobs:
         run: |
           echo "🚀 Deploying backend to production..."
 
-          BACKEND_IMAGE="${{ needs.deployment-preparation.outputs.backend_image }}"
+          BACKEND_VERSION="${{ needs.pre-production-validation.outputs.backend_version }}"
+          BACKEND_IMAGE="${{ env.REGISTRY }}/${{ env.BACKEND_IMAGE }}:$BACKEND_VERSION"
 
           # Get production service ARN
           SERVICE_ARN=$(aws apprunner list-services --query "ServiceSummaryList[?ServiceName=='eloquentai-backend-prod'].ServiceArn" --output text)
@@ -332,6 +336,7 @@ jobs:
           done
 
       - name: Verify production deployment
+        id: verify
         run: |
           SERVICE_ARN="${{ steps.deploy.outputs.SERVICE_ARN }}"
 
@@ -370,6 +375,9 @@ jobs:
     name: Deploy Frontend to Production
     runs-on: ubuntu-latest
     needs: [pre-production-validation, production-ready, deployment-preparation, deploy-production-backend]
+    if: always() && needs.deployment-preparation.result == 'success' && needs.deploy-production-backend.result == 'success'
+    outputs:
+      frontend_url: ${{ steps.verify-frontend.outputs.frontend_url }}
     # Solo developer - no environment protection needed
     # environment: production-frontend
 
@@ -427,6 +435,7 @@ jobs:
           echo "frontend_url=$FRONTEND_URL" >> $GITHUB_OUTPUT
 
       - name: Verify production frontend
+        id: verify-frontend
         run: |
           FRONTEND_URL="${{ steps.deploy.outputs.frontend_url }}"
 
@@ -453,6 +462,9 @@ jobs:
           else
             echo "⚠️ Frontend content verification failed"
           fi
+
+          # Output the frontend URL for other jobs
+          echo "frontend_url=$FRONTEND_URL" >> $GITHUB_OUTPUT
 
   # Production health checks and monitoring
   production-health-checks:
@@ -664,7 +676,7 @@ jobs:
           # Example Slack notification (requires webhook setup):
           # curl -X POST -H 'Content-type: application/json' \
           #   --data '{"text":"🚀 EloquentAI Production Deployment Complete"}' \
-          #   ${{ secrets.SLACK_WEBHOOK_URL }}
+          #   "${SLACK_WEBHOOK_URL}"
 
   # Rollback job (only runs for rollback deployments)
   handle-rollback:
