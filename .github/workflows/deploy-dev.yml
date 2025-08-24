@@ -111,8 +111,8 @@ jobs:
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID}}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY}}
           aws-region: ${{ env.AWS_REGION }}
 
       - name: Login to GitHub Container Registry
@@ -428,8 +428,8 @@ jobs:
         run: |
           echo "🧪 Running post-deployment smoke tests..."
 
-          BACKEND_URL="${{ needs.deploy-backend.outputs.backend_url }}"
-          FRONTEND_URL="${{ needs.deploy-frontend.outputs.frontend_url }}"
+          BACKEND_URL="${{ needs.deploy-backend.outputs.backend_url || '' }}"
+          FRONTEND_URL="${{ needs.deploy-frontend.outputs.frontend_url || '' }}"
 
           SUCCESS=true
 
@@ -506,35 +506,35 @@ jobs:
           echo "" >> $GITHUB_STEP_SUMMARY
 
           # Backend deployment status
-          if [ "${{ needs.deploy-backend.result }}" == "success" ]; then
-            BACKEND_URL="${{ needs.deploy-backend.outputs.backend_url }}"
+          if [ "${{ needs.deploy-backend.result || 'skipped' }}" == "success" ]; then
+            BACKEND_URL="${{ needs.deploy-backend.outputs.backend_url || '' }}"
             echo "✅ **Backend**: Deployed successfully" >> $GITHUB_STEP_SUMMARY
             echo "  - URL: [$BACKEND_URL]($BACKEND_URL)" >> $GITHUB_STEP_SUMMARY
             echo "  - Health Check: [$BACKEND_URL/health]($BACKEND_URL/health)" >> $GITHUB_STEP_SUMMARY
             echo "  - API Docs: [$BACKEND_URL/docs]($BACKEND_URL/docs)" >> $GITHUB_STEP_SUMMARY
-          elif [ "${{ needs.deploy-backend.result }}" == "failure" ]; then
+          elif [ "${{ needs.deploy-backend.result || 'skipped' }}" == "failure" ]; then
             echo "❌ **Backend**: Deployment failed" >> $GITHUB_STEP_SUMMARY
-          elif [ "${{ needs.deploy-backend.result }}" == "skipped" ]; then
+          elif [ "${{ needs.deploy-backend.result || 'skipped' }}" == "skipped" ]; then
             echo "⏭️ **Backend**: Skipped (no changes detected)" >> $GITHUB_STEP_SUMMARY
           fi
 
           # Frontend deployment status
-          if [ "${{ needs.deploy-frontend.result }}" == "success" ]; then
-            FRONTEND_URL="${{ needs.deploy-frontend.outputs.frontend_url }}"
+          if [ "${{ needs.deploy-frontend.result || 'skipped' }}" == "success" ]; then
+            FRONTEND_URL="${{ needs.deploy-frontend.outputs.frontend_url || '' }}"
             echo "✅ **Frontend**: Deployed successfully" >> $GITHUB_STEP_SUMMARY
             echo "  - URL: [$FRONTEND_URL]($FRONTEND_URL)" >> $GITHUB_STEP_SUMMARY
-          elif [ "${{ needs.deploy-frontend.result }}" == "failure" ]; then
+          elif [ "${{ needs.deploy-frontend.result || 'skipped' }}" == "failure" ]; then
             echo "❌ **Frontend**: Deployment failed" >> $GITHUB_STEP_SUMMARY
-          elif [ "${{ needs.deploy-frontend.result }}" == "skipped" ]; then
+          elif [ "${{ needs.deploy-frontend.result || 'skipped' }}" == "skipped" ]; then
             echo "⏭️ **Frontend**: Skipped (no changes detected)" >> $GITHUB_STEP_SUMMARY
           fi
 
           # Smoke tests status
-          if [ "${{ needs.smoke-tests.result }}" == "success" ]; then
+          if [ "${{ needs.smoke-tests.result || 'skipped' }}" == "success" ]; then
             echo "✅ **Smoke Tests**: All tests passed" >> $GITHUB_STEP_SUMMARY
-          elif [ "${{ needs.smoke-tests.result }}" == "failure" ]; then
+          elif [ "${{ needs.smoke-tests.result || 'skipped' }}" == "failure" ]; then
             echo "❌ **Smoke Tests**: Some tests failed" >> $GITHUB_STEP_SUMMARY
-          elif [ "${{ needs.smoke-tests.result }}" == "skipped" ]; then
+          elif [ "${{ needs.smoke-tests.result || 'skipped' }}" == "skipped" ]; then
             echo "⏭️ **Smoke Tests**: Skipped" >> $GITHUB_STEP_SUMMARY
           fi
 
@@ -546,9 +546,9 @@ jobs:
 
       - name: Set final deployment status
         run: |
-          BACKEND_STATUS="${{ needs.deploy-backend.result }}"
-          FRONTEND_STATUS="${{ needs.deploy-frontend.result }}"
-          SMOKE_STATUS="${{ needs.smoke-tests.result }}"
+          BACKEND_STATUS="${{ needs.deploy-backend.result || 'skipped' }}"
+          FRONTEND_STATUS="${{ needs.deploy-frontend.result || 'skipped' }}"
+          SMOKE_STATUS="${{ needs.smoke-tests.result || 'skipped' }}"
 
           # Consider deployment successful if:
           # - At least one component deployed successfully

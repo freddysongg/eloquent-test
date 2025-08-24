@@ -306,8 +306,8 @@ jobs:
         env:
           DATABASE_URL: postgresql://testuser:testpass@localhost:5432/testdb
           REDIS_URL: redis://localhost:6379/0
-          CLAUDE_API_KEY: ${{ secrets.CLAUDE_API_KEY }}
-          PINECONE_API_KEY: ${{ secrets.PINECONE_API_KEY }}
+          CLAUDE_API_KEY: ${{ secrets.CLAUDE_API_KEY || 'test-key' }}
+          PINECONE_API_KEY: ${{ secrets.PINECONE_API_KEY || 'test-key' }}
           ENVIRONMENT: testing
 
       - name: Performance benchmark tests
