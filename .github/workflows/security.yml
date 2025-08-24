@@ -1,0 +1,563 @@
+name: Security Scanning
+
+on:
+  push:
+    branches: [ main, dev ]
+  pull_request:
+    branches: [ main, dev ]
+  schedule:
+    # Run daily at 2 AM UTC
+    - cron: '0 2 * * *'
+
+env:
+  PYTHON_VERSION: "3.11"
+  NODE_VERSION: "20"
+  POETRY_VERSION: "1.6.1"
+
+jobs:
+  # CodeQL Analysis
+  codeql:
+    name: CodeQL Analysis
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read
+      contents: read
+      security-events: write
+
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [ 'python', 'javascript' ]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@v2
+        with:
+          languages: ${{ matrix.language }}
+          queries: security-extended,security-and-quality
+
+      - name: Setup Python for backend analysis
+        if: matrix.language == 'python'
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install Poetry for backend
+        if: matrix.language == 'python'
+        uses: snok/install-poetry@v1
+        with:
+          version: ${{ env.POETRY_VERSION }}
+
+      - name: Install Python dependencies
+        if: matrix.language == 'python'
+        run: |
+          cd backend
+          poetry install --no-interaction
+
+      - name: Setup Node.js for frontend analysis
+        if: matrix.language == 'javascript'
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install JavaScript dependencies
+        if: matrix.language == 'javascript'
+        run: |
+          cd frontend
+          npm ci --prefer-offline --no-audit
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@v2
+        with:
+          category: "/language:${{matrix.language}}"
+
+  # Dependency Vulnerability Scanning
+  dependency-check:
+    name: Dependency Vulnerability Check
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Python Dependencies
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install Poetry
+        uses: snok/install-poetry@v1
+        with:
+          version: ${{ env.POETRY_VERSION }}
+
+      - name: Install Python dependencies
+        run: |
+          cd backend
+          poetry install --no-interaction
+
+      - name: Python security check with Safety
+        run: |
+          cd backend
+          poetry run safety check --json --output safety-report.json
+          poetry run safety check --short-report
+        continue-on-error: true
+
+      - name: Python security check with Bandit
+        run: |
+          cd backend
+          poetry run bandit -r app/ -f json -o bandit-report.json
+          poetry run bandit -r app/ -ll
+        continue-on-error: true
+
+      # JavaScript Dependencies
+      - name: Setup Node.js ${{ env.NODE_VERSION }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install JavaScript dependencies
+        run: |
+          cd frontend
+          npm ci --prefer-offline --no-audit
+
+      - name: JavaScript security audit
+        run: |
+          cd frontend
+          npm audit --audit-level=moderate --json > npm-audit-report.json || true
+          npm audit --audit-level=moderate
+        continue-on-error: true
+
+      - name: Upload dependency scan reports
+        uses: actions/upload-artifact@v3
+        if: always()
+        with:
+          name: dependency-reports
+          path: |
+            backend/safety-report.json
+            backend/bandit-report.json
+            frontend/npm-audit-report.json
+
+  # Secret Scanning
+  secret-scan:
+    name: Secret Detection
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install TruffleHog
+        run: |
+          wget https://github.com/trufflesecurity/trufflehog/releases/download/v3.63.2/trufflehog_3.63.2_linux_amd64.tar.gz
+          tar -xzf trufflehog_3.63.2_linux_amd64.tar.gz
+          chmod +x trufflehog
+          sudo mv trufflehog /usr/local/bin/
+
+      - name: Run TruffleHog secret scan
+        run: |
+          trufflehog git file://. --json --no-update > trufflehog-report.json || true
+
+          # Check for high confidence secrets
+          if trufflehog git file://. --no-update | grep -E "(HIGH|MEDIUM)" > /dev/null; then
+            echo "⚠️  Potential secrets detected - please review"
+            trufflehog git file://. --no-update
+            exit 1
+          else
+            echo "✅ No high-confidence secrets detected"
+          fi
+
+      - name: Scan for hardcoded secrets patterns
+        run: |
+          echo "Scanning for common secret patterns..."
+
+          # Define patterns for common secrets
+          SECRET_PATTERNS=(
+            "password\s*=\s*[\"'][^\"']{8,}[\"']"
+            "api_?key\s*=\s*[\"'][^\"']{16,}[\"']"
+            "secret\s*=\s*[\"'][^\"']{16,}[\"']"
+            "token\s*=\s*[\"'][^\"']{16,}[\"']"
+            "sk_live_[a-zA-Z0-9]{24,}"
+            "pk_live_[a-zA-Z0-9]{24,}"
+            "AKIA[0-9A-Z]{16}"
+          )
+
+          found_secrets=0
+          for pattern in "${SECRET_PATTERNS[@]}"; do
+            if grep -r -E -i "$pattern" . \
+              --exclude-dir=.git \
+              --exclude-dir=node_modules \
+              --exclude-dir=.next \
+              --exclude-dir=htmlcov \
+              --exclude="*.json" \
+              --exclude="*.log"; then
+              found_secrets=1
+            fi
+          done
+
+          if [ $found_secrets -eq 1 ]; then
+            echo "❌ Potential hardcoded secrets found"
+            exit 1
+          else
+            echo "✅ No obvious hardcoded secrets patterns found"
+          fi
+
+      - name: Upload secret scan results
+        uses: actions/upload-artifact@v3
+        if: always()
+        with:
+          name: secret-scan-reports
+          path: |
+            trufflehog-report.json
+
+  # Container Security Scanning
+  container-security:
+    name: Container Security Scan
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # Backend Container Security
+      - name: Build backend Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./backend
+          file: ./backend/Dockerfile
+          push: false
+          tags: eloquentai-backend:security-scan
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Run Trivy vulnerability scanner on backend
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: eloquentai-backend:security-scan
+          format: 'sarif'
+          output: 'backend-trivy-results.sarif'
+          severity: 'CRITICAL,HIGH,MEDIUM'
+          exit-code: '1'
+        continue-on-error: true
+
+      - name: Run Trivy filesystem scan on backend
+        uses: aquasecurity/trivy-action@master
+        with:
+          scan-type: 'fs'
+          scan-ref: './backend'
+          format: 'sarif'
+          output: 'backend-fs-trivy-results.sarif'
+          severity: 'CRITICAL,HIGH'
+        continue-on-error: true
+
+      # Frontend Container Security
+      - name: Build frontend Docker image
+        uses: docker/build-push-action@v5
+        with:
+          context: ./frontend
+          file: ./frontend/Dockerfile
+          push: false
+          tags: eloquentai-frontend:security-scan
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            NEXT_PUBLIC_API_URL=http://localhost:8000
+
+      - name: Run Trivy vulnerability scanner on frontend
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref: eloquentai-frontend:security-scan
+          format: 'sarif'
+          output: 'frontend-trivy-results.sarif'
+          severity: 'CRITICAL,HIGH,MEDIUM'
+          exit-code: '1'
+        continue-on-error: true
+
+      - name: Upload Trivy scan results to GitHub Security tab
+        uses: github/codeql-action/upload-sarif@v2
+        if: always()
+        with:
+          sarif_file: |
+            backend-trivy-results.sarif
+            backend-fs-trivy-results.sarif
+            frontend-trivy-results.sarif
+
+      - name: Upload container security reports
+        uses: actions/upload-artifact@v3
+        if: always()
+        with:
+          name: container-security-reports
+          path: |
+            backend-trivy-results.sarif
+            backend-fs-trivy-results.sarif
+            frontend-trivy-results.sarif
+
+  # OWASP Dependency Check
+  owasp-dependency-check:
+    name: OWASP Dependency Check
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Java for OWASP Dependency Check
+        uses: actions/setup-java@v3
+        with:
+          distribution: 'temurin'
+          java-version: '11'
+
+      - name: Cache OWASP Dependency Check data
+        uses: actions/cache@v3
+        with:
+          path: ~/.gradle/dependency-check-data
+          key: owasp-dependency-check-${{ github.run_id }}
+          restore-keys: owasp-dependency-check-
+
+      - name: Run OWASP Dependency Check
+        run: |
+          # Download and run OWASP Dependency Check
+          wget https://github.com/jeremylong/DependencyCheck/releases/download/v8.4.2/dependency-check-8.4.2-release.zip
+          unzip dependency-check-8.4.2-release.zip
+
+          # Scan backend dependencies
+          ./dependency-check/bin/dependency-check.sh \
+            --project "EloquentAI-Backend" \
+            --scan ./backend \
+            --format ALL \
+            --out ./owasp-backend-report \
+            --suppression ./backend/owasp-suppressions.xml \
+            --nvdApiKey ${{ secrets.NVD_API_KEY }} || true
+
+          # Scan frontend dependencies
+          ./dependency-check/bin/dependency-check.sh \
+            --project "EloquentAI-Frontend" \
+            --scan ./frontend \
+            --format ALL \
+            --out ./owasp-frontend-report \
+            --nvdApiKey ${{ secrets.NVD_API_KEY }} || true
+
+      - name: Upload OWASP Dependency Check reports
+        uses: actions/upload-artifact@v3
+        if: always()
+        with:
+          name: owasp-dependency-check-reports
+          path: |
+            owasp-backend-report/
+            owasp-frontend-report/
+
+  # License Compliance Check
+  license-check:
+    name: License Compliance
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Python License Check
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install Poetry
+        uses: snok/install-poetry@v1
+        with:
+          version: ${{ env.POETRY_VERSION }}
+
+      - name: Install Python dependencies
+        run: |
+          cd backend
+          poetry install --no-interaction
+
+      - name: Check Python package licenses
+        run: |
+          cd backend
+          poetry run pip-licenses --format=json --output-file=python-licenses.json
+          poetry run pip-licenses --format=table
+
+          # Check for problematic licenses
+          if poetry run pip-licenses | grep -E "(GPL|AGPL|LGPL)" > /dev/null; then
+            echo "⚠️  Found copyleft licenses - please review"
+          else
+            echo "✅ No problematic licenses detected in Python dependencies"
+          fi
+        continue-on-error: true
+
+      # JavaScript License Check
+      - name: Setup Node.js ${{ env.NODE_VERSION }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install JavaScript dependencies
+        run: |
+          cd frontend
+          npm ci --prefer-offline --no-audit
+
+      - name: Install license checker
+        run: npm install -g license-checker
+
+      - name: Check JavaScript package licenses
+        run: |
+          cd frontend
+          license-checker --json --out javascript-licenses.json
+          license-checker --summary
+
+          # Check for problematic licenses
+          if license-checker | grep -E "(GPL|AGPL)" > /dev/null; then
+            echo "⚠️  Found copyleft licenses - please review"
+          else
+            echo "✅ No problematic licenses detected in JavaScript dependencies"
+          fi
+        continue-on-error: true
+
+      - name: Upload license reports
+        uses: actions/upload-artifact@v3
+        if: always()
+        with:
+          name: license-reports
+          path: |
+            backend/python-licenses.json
+            frontend/javascript-licenses.json
+
+  # Infrastructure Security
+  infrastructure-security:
+    name: Infrastructure Security
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Scan Docker Compose files
+        run: |
+          echo "Scanning Docker Compose configurations..."
+
+          # Check for common misconfigurations
+          if grep -r "privileged.*true" docker-compose*.yml; then
+            echo "❌ Privileged containers detected"
+            exit 1
+          fi
+
+          if grep -r "network_mode.*host" docker-compose*.yml; then
+            echo "❌ Host networking mode detected"
+            exit 1
+          fi
+
+          if grep -r "volumes.*/" docker-compose*.yml | grep -v "node_modules" | grep -v ".next"; then
+            echo "⚠️  Host volume mounts detected - please review"
+          fi
+
+          echo "✅ Docker Compose security scan completed"
+
+      - name: Scan Dockerfiles for security issues
+        run: |
+          echo "Scanning Dockerfiles for security best practices..."
+
+          # Check for common dockerfile issues
+          find . -name "Dockerfile*" -type f | while read dockerfile; do
+            echo "Scanning $dockerfile..."
+
+            if grep -q "FROM.*:latest" "$dockerfile"; then
+              echo "⚠️  Using latest tag in $dockerfile"
+            fi
+
+            if grep -q "USER root" "$dockerfile"; then
+              echo "⚠️  Running as root in $dockerfile"
+            fi
+
+            if grep -q "ADD http" "$dockerfile"; then
+              echo "⚠️  Using ADD with HTTP in $dockerfile"
+            fi
+
+            if ! grep -q "USER " "$dockerfile"; then
+              echo "⚠️  No USER directive found in $dockerfile"
+            fi
+          done
+
+          echo "✅ Dockerfile security scan completed"
+
+      - name: Check for exposed secrets in config files
+        run: |
+          echo "Checking configuration files for exposed secrets..."
+
+          # Check environment example files
+          if find . -name "*.env*" -type f | xargs grep -E "[A-Za-z0-9]{20,}" 2>/dev/null; then
+            echo "⚠️  Long strings found in environment files - please review"
+          else
+            echo "✅ No obvious secrets in environment files"
+          fi
+
+          # Check for hardcoded URLs and keys
+          if grep -r -E "(localhost|127\.0\.0\.1|0\.0\.0\.0)" --include="*.yml" --include="*.yaml" --include="*.json" .; then
+            echo "⚠️  Hardcoded localhost addresses found - should use environment variables"
+          fi
+
+  # Security Summary
+  security-summary:
+    name: Security Summary
+    runs-on: ubuntu-latest
+    needs: [codeql, dependency-check, secret-scan, container-security, owasp-dependency-check, license-check, infrastructure-security]
+    if: always()
+
+    steps:
+      - name: Security scan summary
+        run: |
+          echo "Security Scanning Summary:"
+          echo "========================="
+          echo "CodeQL Analysis: ${{ needs.codeql.result }}"
+          echo "Dependency Check: ${{ needs.dependency-check.result }}"
+          echo "Secret Scanning: ${{ needs.secret-scan.result }}"
+          echo "Container Security: ${{ needs.container-security.result }}"
+          echo "OWASP Dependency Check: ${{ needs.owasp-dependency-check.result }}"
+          echo "License Check: ${{ needs.license-check.result }}"
+          echo "Infrastructure Security: ${{ needs.infrastructure-security.result }}"
+
+          # Count failed scans
+          failed_scans=0
+
+          if [[ "${{ needs.codeql.result }}" == "failure" ]]; then
+            failed_scans=$((failed_scans + 1))
+          fi
+          if [[ "${{ needs.dependency-check.result }}" == "failure" ]]; then
+            failed_scans=$((failed_scans + 1))
+          fi
+          if [[ "${{ needs.secret-scan.result }}" == "failure" ]]; then
+            failed_scans=$((failed_scans + 1))
+          fi
+          if [[ "${{ needs.container-security.result }}" == "failure" ]]; then
+            failed_scans=$((failed_scans + 1))
+          fi
+          if [[ "${{ needs.infrastructure-security.result }}" == "failure" ]]; then
+            failed_scans=$((failed_scans + 1))
+          fi
+
+          echo ""
+          echo "Failed scans: $failed_scans"
+
+          if [ $failed_scans -eq 0 ]; then
+            echo "✅ All security scans passed!"
+          elif [ $failed_scans -le 2 ]; then
+            echo "⚠️  Some security issues detected - please review"
+          else
+            echo "❌ Multiple security issues detected - immediate attention required"
+            exit 1
+          fi
+
+          echo ""
+          echo "Security Recommendations:"
+          echo "- Review all failed scans in detail"
+          echo "- Address any high/critical vulnerabilities immediately"
+          echo "- Update dependencies regularly"
+          echo "- Rotate any exposed secrets"
+          echo "- Implement additional security controls as needed"
