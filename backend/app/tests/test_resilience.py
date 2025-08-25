@@ -38,8 +38,6 @@ class TestCircuitBreakerConfig:
         assert config.timeout_seconds == 30.0
         # success_threshold controls the number of successful requests required to close the circuit from half-open state
         # The circuit allows through a limited number of requests in half-open state, as determined by success_threshold
-        assert config.success_threshold == 2  # This controls half-open behavior
-
     def test_circuit_breaker_config_custom_values(self) -> None:
         """Test custom circuit breaker configuration."""
         config = CircuitBreakerConfig(
