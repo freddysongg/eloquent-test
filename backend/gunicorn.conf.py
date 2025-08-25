@@ -24,8 +24,6 @@ proc_name = "eloquent-ai-backend"
 # Preload app for better performance
 preload_app = True
 
-# Restart workers after this many requests
-max_requests = 1000
 max_requests_jitter = 100
 
 # Logging
