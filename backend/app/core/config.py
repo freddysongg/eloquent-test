@@ -111,7 +111,6 @@ class Settings(BaseSettings):
         default=[
             "http://localhost:3000",  # Local development
             "https://eloquent-test.vercel.app",  # Production frontend
-            "https://*.vercel.app",  # Preview deployments
         ],
         description="List of allowed CORS origins",
     )
