@@ -82,6 +82,7 @@ repos:
         exclude: |
           (?x)^(
             .*\.lock$|
+            .*\.tsbuildinfo$|
             frontend/node_modules/.*|
             backend/htmlcov/.*|
             backend/\.flake8$
@@ -92,6 +93,7 @@ repos:
         exclude: |
           (?x)^(
             .*\.md$|
+            .*\.tsbuildinfo$|
             frontend/node_modules/.*|
             backend/htmlcov/.*|
             backend/\.flake8$
@@ -145,6 +147,8 @@ repos:
             .*\.tsbuildinfo$|
             .*\.env\.example$|
             .*\.env\.local\.example$|
+            .*\.tfvars$|
+            terraform/.*\.tfvars$|
             frontend/node_modules/.*|
             backend/htmlcov/.*|
             \.github/workflows/.*\.yml$|

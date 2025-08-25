@@ -18,6 +18,61 @@ from typing import Any, Callable, Dict, List, Optional, Set
 
 logger = logging.getLogger(__name__)
 
+# Security audit logger
+audit_logger = logging.getLogger("security_audit")
+
+
+class SecurityEventType(Enum):
+    """Security audit event types."""
+
+    LOGIN_ATTEMPT = "login_attempt"
+    LOGIN_SUCCESS = "login_success"
+    LOGIN_FAILURE = "login_failure"
+    TOKEN_VALIDATION_FAILURE = "token_validation_failure"
+    RATE_LIMIT_EXCEEDED = "rate_limit_exceeded"
+    UNAUTHORIZED_ACCESS = "unauthorized_access"
+    PERMISSION_DENIED = "permission_denied"
+    SUSPICIOUS_ACTIVITY = "suspicious_activity"
+    DATA_ACCESS = "data_access"
+    ADMIN_ACTION = "admin_action"
+
+
+@dataclass
+class SecurityAuditEvent:
+    """Security audit event data structure."""
+
+    timestamp: float
+    event_type: SecurityEventType
+    user_id: Optional[str]
+    session_id: Optional[str]
+    ip_address: Optional[str]
+    user_agent: Optional[str]
+    endpoint: Optional[str]
+    resource: Optional[str]
+    action: Optional[str]
+    result: str  # success, failure, denied
+    risk_level: str  # low, medium, high, critical
+    details: Dict[str, Any] = field(default_factory=dict)
+
+    def to_audit_log(self) -> Dict[str, Any]:
+        """Convert to structured audit log entry."""
+        return {
+            "timestamp": datetime.fromtimestamp(
+                self.timestamp, timezone.utc
+            ).isoformat(),
+            "event_type": self.event_type.value,
+            "user_id": self.user_id,
+            "session_id": self.session_id,
+            "ip_address": self.ip_address,
+            "user_agent": self.user_agent,
+            "endpoint": self.endpoint,
+            "resource": self.resource,
+            "action": self.action,
+            "result": self.result,
+            "risk_level": self.risk_level,
+            "details": self.details,
+        }
+
 
 class AlertSeverity(Enum):
     """Alert severity levels for monitoring system."""
@@ -565,3 +620,235 @@ def log_alert_callback(alert_id: str, severity: AlertSeverity, message: str) -> 
 
 # Register default callback
 error_monitor.register_alert_callback(log_alert_callback)
+
+
+class SecurityAuditTracker:
+    """Security audit event tracking and logging system."""
+
+    def __init__(self, max_events: int = 50000):
+        self.max_events = max_events
+        self.audit_events: deque = deque(maxlen=max_events)
+        self.event_counts: Dict[str, int] = defaultdict(int)
+
+    def log_security_event(
+        self,
+        event_type: SecurityEventType,
+        result: str,
+        risk_level: str = "medium",
+        user_id: Optional[str] = None,
+        session_id: Optional[str] = None,
+        ip_address: Optional[str] = None,
+        user_agent: Optional[str] = None,
+        endpoint: Optional[str] = None,
+        resource: Optional[str] = None,
+        action: Optional[str] = None,
+        **details: Any,
+    ) -> None:
+        """
+        Log a security audit event.
+
+        Args:
+            event_type: Type of security event
+            result: success, failure, denied
+            risk_level: low, medium, high, critical
+            user_id: User identifier (if authenticated)
+            session_id: Session identifier
+            ip_address: Client IP address
+            user_agent: Client user agent
+            endpoint: API endpoint accessed
+            resource: Resource accessed (chat_id, user_id, etc.)
+            action: Action attempted (create, read, update, delete)
+            **details: Additional context information
+        """
+        event = SecurityAuditEvent(
+            timestamp=time.time(),
+            event_type=event_type,
+            user_id=user_id,
+            session_id=session_id,
+            ip_address=ip_address,
+            user_agent=user_agent,
+            endpoint=endpoint,
+            resource=resource,
+            action=action,
+            result=result,
+            risk_level=risk_level,
+            details=details,
+        )
+
+        # Store event
+        self.audit_events.append(event)
+
+        # Update counters
+        event_key = f"{event_type.value}:{result}"
+        self.event_counts[event_key] += 1
+
+        # Log to security audit logger
+        audit_log_entry = event.to_audit_log()
+
+        # Use appropriate log level based on risk
+        if risk_level == "critical":
+            audit_logger.critical(
+                f"SECURITY_CRITICAL: {event_type.value} - {result}",
+                extra={"audit_event": audit_log_entry},
+            )
+        elif risk_level == "high":
+            audit_logger.error(
+                f"SECURITY_HIGH: {event_type.value} - {result}",
+                extra={"audit_event": audit_log_entry},
+            )
+        elif risk_level == "medium":
+            audit_logger.warning(
+                f"SECURITY_MEDIUM: {event_type.value} - {result}",
+                extra={"audit_event": audit_log_entry},
+            )
+        else:
+            audit_logger.info(
+                f"SECURITY_INFO: {event_type.value} - {result}",
+                extra={"audit_event": audit_log_entry},
+            )
+
+        # Also log as structured JSON for SIEM systems
+        audit_logger.info(
+            f"SECURITY_AUDIT_JSON: {json.dumps(audit_log_entry)}",
+            extra={"audit_json": audit_log_entry},
+        )
+
+    def get_security_summary(self, hours: int = 24) -> Dict[str, Any]:
+        """Get security audit summary for specified time window."""
+        cutoff = time.time() - (hours * 3600)
+        recent_events = [e for e in self.audit_events if e.timestamp > cutoff]
+
+        # Event breakdown by type
+        event_breakdown: Dict[str, Dict[str, int]] = defaultdict(
+            lambda: defaultdict(int)
+        )
+        risk_breakdown: Dict[str, int] = defaultdict(int)
+
+        for event in recent_events:
+            event_breakdown[event.event_type.value][event.result] += 1
+            risk_breakdown[event.risk_level] += 1
+
+        # Failed authentication attempts
+        failed_auth = sum(
+            1
+            for e in recent_events
+            if e.event_type
+            in [
+                SecurityEventType.LOGIN_FAILURE,
+                SecurityEventType.TOKEN_VALIDATION_FAILURE,
+            ]
+        )
+
+        # Rate limit violations
+        rate_limits = sum(
+            1
+            for e in recent_events
+            if e.event_type == SecurityEventType.RATE_LIMIT_EXCEEDED
+        )
+
+        # Unauthorized access attempts
+        unauthorized = sum(
+            1
+            for e in recent_events
+            if e.event_type
+            in [
+                SecurityEventType.UNAUTHORIZED_ACCESS,
+                SecurityEventType.PERMISSION_DENIED,
+            ]
+        )
+
+        return {
+            "window_hours": hours,
+            "total_security_events": len(recent_events),
+            "failed_authentication": failed_auth,
+            "rate_limit_violations": rate_limits,
+            "unauthorized_access_attempts": unauthorized,
+            "event_breakdown": dict(event_breakdown),
+            "risk_level_breakdown": dict(risk_breakdown),
+            "high_risk_events": sum(
+                1 for e in recent_events if e.risk_level in ["high", "critical"]
+            ),
+            "unique_users_affected": len(
+                set(e.user_id for e in recent_events if e.user_id)
+            ),
+            "unique_ips": len(set(e.ip_address for e in recent_events if e.ip_address)),
+        }
+
+
+# Global security audit tracker
+security_audit = SecurityAuditTracker()
+
+
+def audit_security_event(
+    event_type: SecurityEventType,
+    result: str,
+    risk_level: str = "medium",
+    **kwargs: Any,
+) -> None:
+    """
+    Convenience function to log security audit events.
+
+    Usage:
+        audit_security_event(
+            SecurityEventType.LOGIN_FAILURE,
+            "failure",
+            risk_level="high",
+            user_id="user123",
+            ip_address="192.168.1.100",
+            details={"reason": "invalid_credentials"}
+        )
+    """
+    security_audit.log_security_event(event_type, result, risk_level, **kwargs)
+
+
+def audit_login_attempt(
+    user_id: str, ip_address: str, success: bool, **details: Any
+) -> None:
+    """Audit login attempt."""
+    event_type = (
+        SecurityEventType.LOGIN_SUCCESS if success else SecurityEventType.LOGIN_FAILURE
+    )
+    result = "success" if success else "failure"
+    risk_level = "low" if success else "medium"
+
+    audit_security_event(
+        event_type,
+        result,
+        risk_level,
+        user_id=user_id,
+        ip_address=ip_address,
+        **details,
+    )
+
+
+def audit_rate_limit_exceeded(
+    ip_address: str, endpoint: str, user_id: Optional[str] = None, **details: Any
+) -> None:
+    """Audit rate limit violation."""
+    audit_security_event(
+        SecurityEventType.RATE_LIMIT_EXCEEDED,
+        "denied",
+        risk_level="medium",
+        user_id=user_id,
+        ip_address=ip_address,
+        endpoint=endpoint,
+        **details,
+    )
+
+
+def audit_unauthorized_access(
+    endpoint: str,
+    user_id: Optional[str] = None,
+    ip_address: Optional[str] = None,
+    **details: Any,
+) -> None:
+    """Audit unauthorized access attempt."""
+    audit_security_event(
+        SecurityEventType.UNAUTHORIZED_ACCESS,
+        "denied",
+        risk_level="high",
+        user_id=user_id,
+        ip_address=ip_address,
+        endpoint=endpoint,
+        **details,
+    )
