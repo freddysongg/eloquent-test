@@ -46,7 +46,7 @@ services:
       dockerfile: Dockerfile
       target: development
     environment:
-      - DATABASE_URL=postgresql://${POSTGRES_USER:-eloquent}:${POSTGRES_PASSWORD:-eloquent_dev_password}@postgres:5432/${POSTGRES_DB:-eloquent_ai}
+      - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER:-eloquent}:${POSTGRES_PASSWORD:-eloquent_dev_password}@postgres:5432/${POSTGRES_DB:-eloquent_ai}
       - REDIS_URL=redis://:${REDIS_PASSWORD:-redis_dev_password}@redis:6379
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
       - PINECONE_API_KEY=${PINECONE_API_KEY}

@@ -1,10 +1,10 @@
-'use client';
+"use client";
 
-import { createContext, useContext, useEffect } from 'react';
-import { useAuth as useClerkAuth, useUser } from '@clerk/nextjs';
+import { createContext, useContext, useEffect } from "react";
+import { useAuth as useClerkAuth, useUser } from "@clerk/nextjs";
 
 interface AuthContextType {
-  user: ReturnType<typeof useUser>['user'];
+  user: ReturnType<typeof useUser>["user"];
   isLoaded: boolean;
   isSignedIn: boolean | undefined;
   signOut: () => Promise<void>;
@@ -24,10 +24,12 @@ export function AuthProvider({ children }: AuthProviderProps) {
 
   // Log authentication state changes in development
   useEffect(() => {
-    if (process.env.NODE_ENV === 'development' && isLoaded) {
-      console.log('Auth state:', { 
-        isSignedIn, 
-        user: user ? { id: user.id, emailAddresses: user.emailAddresses } : null 
+    if (process.env.NODE_ENV === "development" && isLoaded) {
+      console.log("Auth state:", {
+        isSignedIn,
+        user: user
+          ? { id: user.id, emailAddresses: user.emailAddresses }
+          : null,
       });
     }
   }, [isLoaded, isSignedIn, user]);
@@ -45,7 +47,7 @@ export function AuthProvider({ children }: AuthProviderProps) {
 export function useAuth() {
   const context = useContext(AuthContext);
   if (context === undefined) {
-    throw new Error('useAuth must be used within an AuthProvider');
+    throw new Error("useAuth must be used within an AuthProvider");
   }
   return context;
 }

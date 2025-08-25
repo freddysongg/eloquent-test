@@ -53,10 +53,12 @@
   * {
     @apply border-border;
   }
-  
+
   body {
     @apply bg-background text-foreground;
-    font-feature-settings: "rlig" 1, "calt" 1;
+    font-feature-settings:
+      'rlig' 1,
+      'calt' 1;
   }
 
   /* Scrollbar styling */
@@ -87,7 +89,12 @@
   }
 
   /* Typography improvements */
-  h1, h2, h3, h4, h5, h6 {
+  h1,
+  h2,
+  h3,
+  h4,
+  h5,
+  h6 {
     @apply font-semibold tracking-tight;
   }
 
@@ -104,19 +111,29 @@
   }
 
   @keyframes typing-dots {
-    0%, 20% {
+    0%,
+    20% {
       color: transparent;
-      text-shadow: .25em 0 0 currentColor, .5em 0 0 currentColor;
+      text-shadow:
+        0.25em 0 0 currentColor,
+        0.5em 0 0 currentColor;
     }
     40% {
       color: currentColor;
-      text-shadow: .25em 0 0 transparent, .5em 0 0 currentColor;
+      text-shadow:
+        0.25em 0 0 transparent,
+        0.5em 0 0 currentColor;
     }
     60% {
-      text-shadow: .25em 0 0 currentColor, .5em 0 0 transparent;
+      text-shadow:
+        0.25em 0 0 currentColor,
+        0.5em 0 0 transparent;
     }
-    80%, 100% {
-      text-shadow: .25em 0 0 currentColor, .5em 0 0 currentColor;
+    80%,
+    100% {
+      text-shadow:
+        0.25em 0 0 currentColor,
+        0.5em 0 0 currentColor;
     }
   }
 
@@ -125,7 +142,7 @@
   }
 
   .typing-indicator::after {
-    content: "⋯";
+    content: '⋯';
     animation: typing-dots 1.4s infinite;
   }
 
