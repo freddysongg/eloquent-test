@@ -8,13 +8,15 @@ import {
   useState,
   useCallback,
 } from "react";
-import { io, Socket } from "socket.io-client";
+// Using native WebSocket instead of Socket.IO to match backend
+// import { io, Socket } from "socket.io-client";
 import { useAuth } from "@/components/providers/auth-provider";
+import { buildWebSocketUrl } from "@/lib/api";
 
 interface SocketContextType {
-  socket: Socket | null;
+  socket: WebSocket | null;
   isConnected: boolean;
-  connect: () => void;
+  connect: (chatId?: string) => void;
   disconnect: () => void;
 }
 
@@ -25,15 +27,16 @@ interface SocketProviderProps {
 }
 
 export function SocketProvider({ children }: SocketProviderProps) {
-  const [socket, setSocket] = useState<Socket | null>(null);
+  const [socket, setSocket] = useState<WebSocket | null>(null);
   const [isConnected, setIsConnected] = useState(false);
   const { user, isLoaded } = useAuth();
   const reconnectTimeoutRef = useRef<NodeJS.Timeout>();
   const reconnectAttemptsRef = useRef(0);
   const maxReconnectAttempts = 5;
+  const currentChatIdRef = useRef<string>("");
 
   // Store connect function in a ref to avoid circular dependency
-  const connectRef = useRef<() => void>();
+  const connectRef = useRef<(chatId?: string) => void>();
 
   const handleReconnect = useCallback(() => {
     if (reconnectAttemptsRef.current >= maxReconnectAttempts) {
@@ -53,65 +56,85 @@ export function SocketProvider({ children }: SocketProviderProps) {
     reconnectTimeoutRef.current = setTimeout(() => {
       reconnectAttemptsRef.current += 1;
       // Reconnection attempt ${reconnectAttemptsRef.current}/${maxReconnectAttempts}
-      connectRef.current?.();
+      connectRef.current?.(currentChatIdRef.current);
     }, delay);
   }, []);
 
-  const connect = useCallback(() => {
-    if (socket?.connected) return;
+  const connect = useCallback(
+    (chatId?: string) => {
+      if (socket && socket.readyState === WebSocket.OPEN) return;
 
-    const socketUrl =
-      process.env.NEXT_PUBLIC_WEBSOCKET_URL || "ws://localhost:8000";
+      // Update current chat ID for reconnection
+      if (chatId) {
+        currentChatIdRef.current = chatId;
+      }
 
-    const newSocket = io(socketUrl, {
-      ...(user && { auth: { userId: user.id } }),
-      transports: ["websocket", "polling"],
-      timeout: 20000,
-      reconnection: true,
-      reconnectionDelay: 1000,
-      reconnectionDelayMax: 5000,
-      reconnectionAttempts: maxReconnectAttempts,
-    });
+      const chatIdParam = currentChatIdRef.current || "default";
+      const userId = user?.id || "anonymous";
+      const socketUrl = buildWebSocketUrl(chatIdParam, userId);
 
-    newSocket.on("connect", () => {
-      setIsConnected(true);
-      reconnectAttemptsRef.current = 0;
-    });
+      console.log("Connecting WebSocket to:", socketUrl);
 
-    newSocket.on("disconnect", (reason) => {
-      setIsConnected(false);
+      try {
+        const newSocket = new WebSocket(socketUrl);
 
-      // Handle reconnection for certain disconnect reasons
-      if (reason === "io server disconnect") {
-        // Server initiated disconnect, try to reconnect
+        newSocket.onopen = () => {
+          console.log("WebSocket connected");
+          setIsConnected(true);
+          reconnectAttemptsRef.current = 0;
+        };
+
+        newSocket.onclose = (event) => {
+          console.log("WebSocket disconnected:", event.code, event.reason);
+          setIsConnected(false);
+
+          // Reconnect unless it was a clean close
+          if (event.code !== 1000 && event.code !== 1001) {
+            handleReconnect();
+          }
+        };
+
+        newSocket.onerror = (error) => {
+          console.error("WebSocket error:", error);
+          setIsConnected(false);
+          handleReconnect();
+        };
+
+        newSocket.onmessage = (event) => {
+          try {
+            const data = JSON.parse(event.data);
+            console.log("Received WebSocket message:", data);
+
+            // Handle different message types
+            switch (data.type) {
+              case "message_received":
+                // Handle incoming chat messages
+                break;
+              case "typing_start":
+                // Handle typing indicators
+                break;
+              case "typing_stop":
+                // Handle typing indicators
+                break;
+              case "error":
+                console.error("WebSocket message error:", data.error);
+                break;
+              default:
+                console.log("Unknown WebSocket message type:", data.type);
+            }
+          } catch (error) {
+            console.error("Failed to parse WebSocket message:", error);
+          }
+        };
+
+        setSocket(newSocket);
+      } catch (error) {
+        console.error("Failed to create WebSocket:", error);
         handleReconnect();
       }
-    });
-
-    newSocket.on("connect_error", () => {
-      setIsConnected(false);
-      handleReconnect();
-    });
-
-    newSocket.on("error", () => {
-      // Socket error handling
-    });
-
-    // Chat-specific event listeners
-    newSocket.on("message_received", () => {
-      // Handle incoming messages
-    });
-
-    newSocket.on("typing_start", () => {
-      // Handle typing indicators
-    });
-
-    newSocket.on("typing_stop", () => {
-      // Handle typing indicators
-    });
-
-    setSocket(newSocket);
-  }, [socket, user, handleReconnect]);
+    },
+    [socket, user, handleReconnect],
+  );
 
   // Update the ref whenever connect changes
   connectRef.current = connect;
@@ -122,10 +145,11 @@ export function SocketProvider({ children }: SocketProviderProps) {
     }
 
     if (socket) {
-      socket.disconnect();
+      socket.close(1000, "Client disconnecting");
       setSocket(null);
       setIsConnected(false);
       reconnectAttemptsRef.current = 0;
+      currentChatIdRef.current = "";
     }
   }, [socket]);
 
@@ -138,7 +162,7 @@ export function SocketProvider({ children }: SocketProviderProps) {
     return () => {
       disconnect();
     };
-  }, [isLoaded, user?.id, connect, disconnect]); // Reconnect when user changes
+  }, [isLoaded, user?.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Cleanup on unmount
   useEffect(() => {

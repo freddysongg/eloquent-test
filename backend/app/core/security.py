@@ -181,6 +181,27 @@ async def verify_clerk_token(token: str) -> ClerkUser:
     Raises:
         HTTPException: If token verification fails
     """
+    # Development mode bypass for testing
+    if settings.ENVIRONMENT == "development" and settings.CLERK_SECRET_KEY in [
+        "sk_test_development",
+        "development",
+    ]:
+        # Return mock user for development
+        return ClerkUser(
+            id=f"user_development_{token[:8]}",
+            email_addresses=[
+                {
+                    "id": "email_1",
+                    "primary_email_address_id": "email_1",
+                    "email_address": "dev@eloquentai.com",
+                }
+            ],
+            first_name="Development",
+            last_name="User",
+            created_at=int(datetime.utcnow().timestamp()),
+            updated_at=int(datetime.utcnow().timestamp()),
+        )
+
     try:
         # Clerk JWT verification endpoint
         verify_url = f"https://api.clerk.dev/v1/sessions/verify"
