@@ -145,6 +145,8 @@ repos:
             .*\.tsbuildinfo$|
             .*\.env\.example$|
             .*\.env\.local\.example$|
+            .*\.tfvars$|
+            terraform/.*\.tfvars$|
             frontend/node_modules/.*|
             backend/htmlcov/.*|
             \.github/workflows/.*\.yml$|
