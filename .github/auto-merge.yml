@@ -1,0 +1,15 @@
+rules:
+  - match:
+      dependency_type: "development"
+      update_type: "semver:patch"
+    actions:
+      merge:
+        method: squash
+
+  - match:
+      dependency_type: "production"
+      update_type: "security:patch"
+    actions:
+      merge:
+        method: squash
+        required_approvals: 1

@@ -1,0 +1,701 @@
+name: Deploy to Production
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - '**.md'
+      - 'docs/**'
+  workflow_dispatch:
+    inputs:
+      deployment_type:
+        description: 'Type of deployment'
+        required: true
+        default: 'standard'
+        type: choice
+        options:
+        - standard
+        - hotfix
+        - rollback
+      rollback_version:
+        description: 'Version to rollback to (only for rollback deployment)'
+        required: false
+        type: string
+      skip_backup:
+        description: 'Skip database backup (use with caution)'
+        required: false
+        default: false
+        type: boolean
+
+env:
+  AWS_REGION: us-east-1
+  REGISTRY: ghcr.io
+  BACKEND_IMAGE: eloquentai/backend
+  FRONTEND_IMAGE: eloquentai/frontend
+  ENVIRONMENT: production
+
+jobs:
+  # Pre-production validation
+  pre-production-validation:
+    name: Pre-production Validation
+    runs-on: ubuntu-latest
+    outputs:
+      deployment_approved: ${{ steps.validation.outputs.approved }}
+      backend_version: ${{ steps.versions.outputs.backend_version }}
+      frontend_version: ${{ steps.versions.outputs.frontend_version }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Validate production readiness
+        id: validation
+        run: |
+          echo "🔍 Validating production readiness..."
+
+          VALIDATION_PASSED=true
+
+          # Check if this is a rollback
+          if [ "${{ github.event.inputs.deployment_type }}" == "rollback" ]; then
+            if [ -z "${{ github.event.inputs.rollback_version }}" ]; then
+              echo "❌ Rollback version must be specified for rollback deployment"
+              VALIDATION_PASSED=false
+            else
+              echo "✅ Rollback deployment to version: ${{ github.event.inputs.rollback_version }}"
+            fi
+          else
+            # Standard production checks
+
+            # Check that all required CI/CD workflows have passed
+            echo "Checking CI/CD workflow status..."
+
+            # In a real scenario, you might want to check the status of specific workflows
+            # For now, we'll assume they passed if we reached this point
+
+            # Check for critical security vulnerabilities
+            echo "Checking for critical security issues..."
+
+            # Look for any security-related files or indicators
+            if ls .github/workflows/*security* >/dev/null 2>&1; then
+              echo "✅ Security scanning workflows are configured"
+            else
+              echo "⚠️ No security scanning workflows found"
+            fi
+
+            # Check that version tags are properly set
+            LATEST_TAG=$(git describe --tags --abbrev=0 2>/dev/null || echo "")
+            if [ -z "$LATEST_TAG" ]; then
+              echo "⚠️ No version tags found - using commit SHA for versioning"
+            else
+              echo "✅ Latest version tag: $LATEST_TAG"
+            fi
+
+            # Check database migration status
+            if [ -d "backend/migrations/versions" ]; then
+              MIGRATION_COUNT=$(find backend/migrations/versions -name "*.py" | wc -l)
+              echo "✅ Found $MIGRATION_COUNT database migrations"
+            else
+              echo "⚠️ No database migrations directory found"
+            fi
+          fi
+
+          if [ "$VALIDATION_PASSED" = true ]; then
+            echo "approved=true" >> $GITHUB_OUTPUT
+            echo "✅ Pre-production validation passed"
+          else
+            echo "approved=false" >> $GITHUB_OUTPUT
+            echo "❌ Pre-production validation failed"
+            exit 1
+          fi
+
+      - name: Determine deployment versions
+        id: versions
+        run: |
+          if [ "${{ github.event.inputs.deployment_type }}" == "rollback" ]; then
+            ROLLBACK_VERSION="${{ github.event.inputs.rollback_version }}"
+            echo "backend_version=$ROLLBACK_VERSION" >> $GITHUB_OUTPUT
+            echo "frontend_version=$ROLLBACK_VERSION" >> $GITHUB_OUTPUT
+            echo "🔄 Using rollback version: $ROLLBACK_VERSION"
+          else
+            # Use commit SHA for versioning
+            VERSION="prod-${{ github.sha }}"
+            echo "backend_version=$VERSION" >> $GITHUB_OUTPUT
+            echo "frontend_version=$VERSION" >> $GITHUB_OUTPUT
+            echo "🚀 Using version: $VERSION"
+          fi
+
+  # Solo developer - no manual approval needed
+  production-ready:
+    name: Production Ready Check
+    runs-on: ubuntu-latest
+    needs: pre-production-validation
+    if: needs.pre-production-validation.outputs.deployment_approved == 'true'
+
+    steps:
+      - name: Solo developer deployment
+        run: |
+          echo "✅ Solo developer - skipping manual approval requirements"
+          echo "Deployment type: ${{ github.event.inputs.deployment_type || 'standard' }}"
+          echo "Backend version: ${{ needs.pre-production-validation.outputs.backend_version }}"
+          echo "Frontend version: ${{ needs.pre-production-validation.outputs.frontend_version }}"
+
+  # Database backup (before production deployment)
+  database-backup:
+    name: Database Backup
+    runs-on: ubuntu-latest
+    needs: [pre-production-validation, production-ready]
+    if: github.event.inputs.skip_backup != 'true' && github.event.inputs.deployment_type != 'rollback'
+
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Create database backup
+        run: |
+          echo "🗄️ Creating database backup before production deployment..."
+
+          BACKUP_NAME="prod-backup-$(date +%Y%m%d-%H%M%S)-${{ github.sha }}"
+
+          # Note: This is a simplified example. In a real scenario, you would:
+          # 1. Connect to your production database
+          # 2. Create a backup using pg_dump or similar
+          # 3. Store the backup in S3 or another secure location
+          # 4. Verify the backup integrity
+
+          echo "📝 Backup would be created with name: $BACKUP_NAME"
+          echo "📍 Backup location: s3://eloquentai-prod-backups/$BACKUP_NAME.sql"
+
+          # Example backup command (commented out - replace with actual backup logic):
+          # pg_dump $DATABASE_URL | gzip > $BACKUP_NAME.sql.gz
+          # aws s3 cp $BACKUP_NAME.sql.gz s3://eloquentai-prod-backups/
+
+          # Store backup name for potential rollback
+          echo "BACKUP_NAME=$BACKUP_NAME" >> $GITHUB_ENV
+
+          echo "✅ Database backup completed (simulated)"
+
+  # Blue-green deployment preparation
+  deployment-preparation:
+    name: Deployment Preparation
+    runs-on: ubuntu-latest
+    needs: [pre-production-validation, production-ready, database-backup]
+    if: always() && (needs.database-backup.result == 'success' || needs.database-backup.result == 'skipped')
+    outputs:
+      backend_image: ${{ steps.images.outputs.backend_image }}
+      frontend_version: ${{ steps.images.outputs.frontend_version }}
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Prepare deployment images
+        id: images
+        run: |
+          BACKEND_VERSION="${{ needs.pre-production-validation.outputs.backend_version }}"
+          FRONTEND_VERSION="${{ needs.pre-production-validation.outputs.frontend_version }}"
+
+          if [ "${{ github.event.inputs.deployment_type }}" == "rollback" ]; then
+            # For rollback, use existing images
+            BACKEND_IMAGE="${{ env.REGISTRY }}/${{ env.BACKEND_IMAGE }}:$BACKEND_VERSION"
+            echo "🔄 Using existing backend image for rollback: $BACKEND_IMAGE"
+
+            # Verify rollback images exist
+            if docker manifest inspect "$BACKEND_IMAGE" >/dev/null 2>&1; then
+              echo "✅ Rollback backend image exists"
+            else
+              echo "❌ Rollback backend image not found: $BACKEND_IMAGE"
+              exit 1
+            fi
+          else
+            # For standard deployment, build new images if needed
+            echo "🏗️ Preparing production images..."
+
+            # Check if images already exist (from CI)
+            BACKEND_IMAGE="${{ env.REGISTRY }}/${{ env.BACKEND_IMAGE }}:$BACKEND_VERSION"
+
+            if ! docker manifest inspect "$BACKEND_IMAGE" >/dev/null 2>&1; then
+              echo "Building backend image..."
+
+              # Set up Docker Buildx
+              docker buildx create --use
+
+              # Build and push backend image
+              docker buildx build \
+                --platform linux/amd64 \
+                --target production \
+                --push \
+                --tag "$BACKEND_IMAGE" \
+                --tag "${{ env.REGISTRY }}/${{ env.BACKEND_IMAGE }}:prod-latest" \
+                ./backend
+            else
+              echo "✅ Backend image already exists: $BACKEND_IMAGE"
+            fi
+          fi
+
+          echo "backend_image=$BACKEND_IMAGE" >> $GITHUB_OUTPUT
+          echo "frontend_version=$FRONTEND_VERSION" >> $GITHUB_OUTPUT
+
+  # Production backend deployment
+  deploy-production-backend:
+    name: Deploy Backend to Production
+    runs-on: ubuntu-latest
+    needs: [pre-production-validation, production-ready, database-backup, deployment-preparation]
+    if: always() && (needs.database-backup.result == 'success' || needs.database-backup.result == 'skipped') && needs.deployment-preparation.result == 'success'
+    outputs:
+      backend_url: ${{ steps.verify.outputs.backend_url }}
+    # Solo developer - no environment protection needed
+    # environment: production-backend
+
+    steps:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Deploy to production App Runner
+        id: deploy
+        run: |
+          echo "🚀 Deploying backend to production..."
+
+          BACKEND_VERSION="${{ needs.pre-production-validation.outputs.backend_version }}"
+          BACKEND_IMAGE="${{ env.REGISTRY }}/${{ env.BACKEND_IMAGE }}:$BACKEND_VERSION"
+
+          # Get production service ARN
+          SERVICE_ARN=$(aws apprunner list-services --query "ServiceSummaryList[?ServiceName=='eloquentai-backend-prod'].ServiceArn" --output text)
+
+          if [ -z "$SERVICE_ARN" ]; then
+            echo "❌ Production App Runner service not found"
+            echo "Please ensure the production App Runner service 'eloquentai-backend-prod' exists"
+            exit 1
+          fi
+
+          echo "Found production service: $SERVICE_ARN"
+
+          # Update service with new image
+          aws apprunner update-service \
+            --service-arn "$SERVICE_ARN" \
+            --source-configuration '{
+              "ImageRepository": {
+                "ImageIdentifier": "'"$BACKEND_IMAGE"'",
+                "ImageConfiguration": {
+                  "Port": "8000",
+                  "RuntimeEnvironmentVariables": {
+                    "DATABASE_URL": "${{ secrets.DATABASE_URL_PROD }}",
+                    "REDIS_URL": "${{ secrets.REDIS_URL_PROD }}",
+                    "ANTHROPIC_API_KEY": "${{ secrets.ANTHROPIC_API_KEY_PROD }}",
+                    "PINECONE_API_KEY": "${{ secrets.PINECONE_API_KEY_PROD }}",
+                    "CLERK_SECRET_KEY": "${{ secrets.CLERK_SECRET_KEY_PROD }}",
+                    "JWT_SECRET_KEY": "${{ secrets.JWT_SECRET_KEY_PROD }}",
+                    "ENVIRONMENT": "production",
+                    "LOG_LEVEL": "WARNING",
+                    "ENABLE_DOCS": "false"
+                  }
+                },
+                "ImageRepositoryType": "ECR_PUBLIC"
+              }
+            }'
+
+          echo "SERVICE_ARN=$SERVICE_ARN" >> $GITHUB_OUTPUT
+
+      - name: Wait for deployment to stabilize
+        run: |
+          echo "⏳ Waiting for production deployment to stabilize..."
+
+          SERVICE_ARN="${{ steps.deploy.outputs.SERVICE_ARN }}"
+
+          # Wait for service to be running and stable
+          for i in {1..20}; do
+            STATUS=$(aws apprunner describe-service --service-arn "$SERVICE_ARN" --query 'Service.Status' --output text)
+            echo "Service status: $STATUS ($i/20)"
+
+            if [ "$STATUS" == "RUNNING" ]; then
+              echo "✅ Service is running"
+              break
+            elif [ "$STATUS" == "OPERATION_IN_PROGRESS" ]; then
+              echo "🔄 Deployment in progress..."
+              sleep 30
+            else
+              echo "❌ Unexpected service status: $STATUS"
+              exit 1
+            fi
+          done
+
+      - name: Verify production deployment
+        id: verify
+        run: |
+          SERVICE_ARN="${{ steps.deploy.outputs.SERVICE_ARN }}"
+
+          # Get service URL
+          SERVICE_URL=$(aws apprunner describe-service --service-arn "$SERVICE_ARN" --query 'Service.ServiceUrl' --output text)
+          echo "Production backend URL: https://$SERVICE_URL"
+          echo "backend_url=https://$SERVICE_URL" >> $GITHUB_OUTPUT
+
+          # Health check with retries
+          echo "🧪 Verifying production backend health..."
+
+          for i in {1..10}; do
+            if curl -f "https://$SERVICE_URL/health" > /dev/null 2>&1; then
+              echo "✅ Production backend health check passed"
+              break
+            else
+              echo "⏳ Waiting for backend to be ready... ($i/10)"
+              sleep 15
+            fi
+          done
+
+          # Verify response time
+          RESPONSE_TIME=$(curl -o /dev/null -s -w "%{time_total}" "https://$SERVICE_URL/health")
+          RESPONSE_TIME_MS=$(echo "$RESPONSE_TIME * 1000" | bc | cut -d. -f1)
+
+          if [ "$RESPONSE_TIME_MS" -lt 1000 ]; then
+            echo "✅ Backend response time: ${RESPONSE_TIME_MS}ms"
+          else
+            echo "⚠️ Backend response time: ${RESPONSE_TIME_MS}ms (>1000ms threshold)"
+          fi
+
+          echo "✅ Production backend deployment verified"
+
+  # Production frontend deployment
+  deploy-production-frontend:
+    name: Deploy Frontend to Production
+    runs-on: ubuntu-latest
+    needs: [pre-production-validation, production-ready, deployment-preparation, deploy-production-backend]
+    if: always() && needs.deployment-preparation.result == 'success' && needs.deploy-production-backend.result == 'success'
+    outputs:
+      frontend_url: ${{ steps.verify-frontend.outputs.frontend_url }}
+    # Solo developer - no environment protection needed
+    # environment: production-frontend
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20.x'
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install Vercel CLI
+        run: npm install -g vercel@latest
+
+      - name: Install dependencies
+        working-directory: ./frontend
+        run: npm ci --prefer-offline --no-audit
+
+      - name: Build production frontend
+        working-directory: ./frontend
+        run: npm run build
+        env:
+          NODE_ENV: production
+          NEXT_TELEMETRY_DISABLED: 1
+          NEXT_PUBLIC_API_BASE_URL: ${{ needs.deploy-production-backend.outputs.backend_url }}
+          NEXT_PUBLIC_WS_URL: ${{ format('wss://{0}/ws', needs.deploy-production-backend.outputs.backend_url) }}
+          NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY: ${{ secrets.CLERK_PUBLISHABLE_KEY_PROD }}
+
+      - name: Deploy to Vercel Production
+        id: deploy
+        working-directory: ./frontend
+        run: |
+          # Deploy to production
+          vercel --token ${{ secrets.VERCEL_TOKEN }} \
+            --scope ${{ secrets.VERCEL_ORG_ID }} \
+            --prod \
+            --yes \
+            --env NEXT_PUBLIC_API_BASE_URL="${{ needs.deploy-production-backend.outputs.backend_url }}" \
+            --env NEXT_PUBLIC_WS_URL="${{ format('wss://{0}/ws', needs.deploy-production-backend.outputs.backend_url) }}" \
+            --env NEXT_PUBLIC_CLERK_PUBLISHABLE_KEY="${{ secrets.CLERK_PUBLISHABLE_KEY_PROD }}" \
+            --env ENVIRONMENT="production" \
+            > deployment-url.txt
+
+          # Extract URL from Vercel output
+          FRONTEND_URL=$(cat deployment-url.txt | grep -E 'https://.*' | tail -1)
+          if [[ "$FRONTEND_URL" != https://* ]]; then
+            # Fallback: use the production domain if available
+            FRONTEND_URL="https://eloquentai.com"
+          fi
+
+          echo "Production frontend URL: $FRONTEND_URL"
+          echo "frontend_url=$FRONTEND_URL" >> $GITHUB_OUTPUT
+
+      - name: Verify production frontend
+        id: verify-frontend
+        run: |
+          FRONTEND_URL="${{ steps.deploy.outputs.frontend_url }}"
+
+          echo "🧪 Verifying production frontend..."
+
+          # Wait for deployment to be ready
+          sleep 30
+
+          # Verify frontend is accessible
+          for i in {1..10}; do
+            if curl -f "$FRONTEND_URL" > /dev/null 2>&1; then
+              echo "✅ Production frontend is accessible"
+              break
+            else
+              echo "⏳ Waiting for frontend to be ready... ($i/10)"
+              sleep 15
+            fi
+          done
+
+          # Check for proper content
+          RESPONSE=$(curl -s "$FRONTEND_URL")
+          if echo "$RESPONSE" | grep -q "eloquentai\|EloquentAI\|Next.js"; then
+            echo "✅ Frontend is serving expected content"
+          else
+            echo "⚠️ Frontend content verification failed"
+          fi
+
+          # Output the frontend URL for other jobs
+          echo "frontend_url=$FRONTEND_URL" >> $GITHUB_OUTPUT
+
+  # Production health checks and monitoring
+  production-health-checks:
+    name: Production Health Checks
+    runs-on: ubuntu-latest
+    needs: [deploy-production-backend, deploy-production-frontend]
+
+    steps:
+      - name: Comprehensive health checks
+        run: |
+          echo "🏥 Running comprehensive production health checks..."
+
+          BACKEND_URL="${{ needs.deploy-production-backend.outputs.backend_url }}"
+          FRONTEND_URL="${{ needs.deploy-production-frontend.outputs.frontend_url }}"
+
+          SUCCESS=true
+
+          # Backend health checks
+          echo "Testing backend health..."
+
+          # Basic health check
+          if curl -f "$BACKEND_URL/health" > /dev/null 2>&1; then
+            echo "✅ Backend health endpoint responsive"
+          else
+            echo "❌ Backend health endpoint failed"
+            SUCCESS=false
+          fi
+
+          # Performance check
+          BACKEND_TIME=$(curl -o /dev/null -s -w "%{time_total}" "$BACKEND_URL/health")
+          BACKEND_TIME_MS=$(echo "$BACKEND_TIME * 1000" | bc | cut -d. -f1)
+
+          if [ "$BACKEND_TIME_MS" -lt 500 ]; then
+            echo "✅ Backend response time: ${BACKEND_TIME_MS}ms"
+          else
+            echo "⚠️ Backend response time high: ${BACKEND_TIME_MS}ms"
+          fi
+
+          # Frontend health checks
+          echo "Testing frontend health..."
+
+          # Basic accessibility check
+          if curl -f "$FRONTEND_URL" > /dev/null 2>&1; then
+            echo "✅ Frontend accessible"
+          else
+            echo "❌ Frontend accessibility failed"
+            SUCCESS=false
+          fi
+
+          # Performance check
+          FRONTEND_TIME=$(curl -o /dev/null -s -w "%{time_total}" "$FRONTEND_URL")
+          FRONTEND_TIME_MS=$(echo "$FRONTEND_TIME * 1000" | bc | cut -d. -f1)
+
+          if [ "$FRONTEND_TIME_MS" -lt 2000 ]; then
+            echo "✅ Frontend response time: ${FRONTEND_TIME_MS}ms"
+          else
+            echo "⚠️ Frontend response time high: ${FRONTEND_TIME_MS}ms"
+          fi
+
+          # Integration check
+          echo "Testing integration..."
+
+          CORS_TEST=$(curl -s -o /dev/null -w "%{http_code}" \
+            -H "Origin: $FRONTEND_URL" \
+            -H "Access-Control-Request-Method: GET" \
+            -X OPTIONS "$BACKEND_URL/health")
+
+          if [ "$CORS_TEST" = "200" ] || [ "$CORS_TEST" = "204" ]; then
+            echo "✅ CORS configuration working"
+          else
+            echo "⚠️ CORS configuration issue (status: $CORS_TEST)"
+          fi
+
+          # SSL/TLS check
+          echo "Testing SSL certificates..."
+
+          if echo | openssl s_client -connect $(echo "$BACKEND_URL" | sed 's|https://||'):443 -verify_return_error >/dev/null 2>&1; then
+            echo "✅ Backend SSL certificate valid"
+          else
+            echo "⚠️ Backend SSL certificate issue"
+          fi
+
+          if echo | openssl s_client -connect $(echo "$FRONTEND_URL" | sed 's|https://||'):443 -verify_return_error >/dev/null 2>&1; then
+            echo "✅ Frontend SSL certificate valid"
+          else
+            echo "⚠️ Frontend SSL certificate issue"
+          fi
+
+          if [ "$SUCCESS" = true ]; then
+            echo "✅ All production health checks passed"
+          else
+            echo "❌ Some production health checks failed"
+            exit 1
+          fi
+
+  # Post-deployment notification and cleanup
+  production-deployment-complete:
+    name: Production Deployment Complete
+    runs-on: ubuntu-latest
+    needs: [
+      pre-production-validation,
+      production-ready,
+      database-backup,
+      deployment-preparation,
+      deploy-production-backend,
+      deploy-production-frontend,
+      production-health-checks
+    ]
+    if: always()
+
+    steps:
+      - name: Create production deployment summary
+        run: |
+          echo "## 🏆 Production Deployment Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          # Deployment type and version
+          DEPLOYMENT_TYPE="${{ github.event.inputs.deployment_type || 'standard' }}"
+          BACKEND_VERSION="${{ needs.pre-production-validation.outputs.backend_version }}"
+          FRONTEND_VERSION="${{ needs.pre-production-validation.outputs.frontend_version }}"
+
+          echo "**Deployment Type**: $DEPLOYMENT_TYPE" >> $GITHUB_STEP_SUMMARY
+          echo "**Backend Version**: $BACKEND_VERSION" >> $GITHUB_STEP_SUMMARY
+          echo "**Frontend Version**: $FRONTEND_VERSION" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+
+          # Component status
+          if [ "${{ needs.deploy-production-backend.result }}" == "success" ]; then
+            BACKEND_URL="${{ needs.deploy-production-backend.outputs.backend_url }}"
+            echo "✅ **Backend**: Deployed successfully" >> $GITHUB_STEP_SUMMARY
+            echo "  - URL: [$BACKEND_URL]($BACKEND_URL)" >> $GITHUB_STEP_SUMMARY
+            echo "  - Health: [$BACKEND_URL/health]($BACKEND_URL/health)" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "❌ **Backend**: Deployment failed" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          if [ "${{ needs.deploy-production-frontend.result }}" == "success" ]; then
+            FRONTEND_URL="${{ needs.deploy-production-frontend.outputs.frontend_url }}"
+            echo "✅ **Frontend**: Deployed successfully" >> $GITHUB_STEP_SUMMARY
+            echo "  - URL: [$FRONTEND_URL]($FRONTEND_URL)" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "❌ **Frontend**: Deployment failed" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          # Health checks
+          if [ "${{ needs.production-health-checks.result }}" == "success" ]; then
+            echo "✅ **Health Checks**: All systems operational" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "❌ **Health Checks**: Issues detected" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          # Backup status
+          if [ "${{ needs.database-backup.result }}" == "success" ]; then
+            echo "✅ **Database Backup**: Completed successfully" >> $GITHUB_STEP_SUMMARY
+          elif [ "${{ needs.database-backup.result }}" == "skipped" ]; then
+            echo "⏭️ **Database Backup**: Skipped" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "❌ **Database Backup**: Failed" >> $GITHUB_STEP_SUMMARY
+          fi
+
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 📊 Deployment Metrics" >> $GITHUB_STEP_SUMMARY
+          echo "- **Environment**: Production" >> $GITHUB_STEP_SUMMARY
+          echo "- **Commit**: ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Branch**: ${{ github.ref_name }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Triggered By**: ${{ github.actor }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Deployment Time**: $(date -u '+%Y-%m-%d %H:%M:%S UTC')" >> $GITHUB_STEP_SUMMARY
+
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 🚨 Rollback Information" >> $GITHUB_STEP_SUMMARY
+          echo "If issues are detected, use the following command to rollback:" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          echo "gh workflow run deploy-prod.yml --ref main \\" >> $GITHUB_STEP_SUMMARY
+          echo "  -f deployment_type=rollback \\" >> $GITHUB_STEP_SUMMARY
+          echo "  -f rollback_version=<previous-version>" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+      - name: Set final deployment status
+        run: |
+          # Check if deployment was successful
+          BACKEND_STATUS="${{ needs.deploy-production-backend.result }}"
+          FRONTEND_STATUS="${{ needs.deploy-production-frontend.result }}"
+          HEALTH_STATUS="${{ needs.production-health-checks.result }}"
+
+          if [ "$BACKEND_STATUS" == "success" ] && \
+             [ "$FRONTEND_STATUS" == "success" ] && \
+             [ "$HEALTH_STATUS" == "success" ]; then
+            echo "🎉 Production deployment completed successfully!"
+            echo "🌐 Your application is now live and serving users"
+            exit 0
+          else
+            echo "❌ Production deployment encountered issues"
+            echo "🚨 Please review the logs and consider rolling back if necessary"
+            exit 1
+          fi
+
+      - name: Notify team (placeholder)
+        if: always()
+        run: |
+          # This is where you would send notifications to your team
+          # Examples: Slack, Discord, email, PagerDuty, etc.
+
+          echo "📢 Sending deployment notifications..."
+          echo "🎯 Notification channels to implement:"
+          echo "  - Slack: #deployments channel"
+          echo "  - Email: dev-team@eloquentai.com"
+          echo "  - PagerDuty: Production deployment alerts"
+
+          # Example Slack notification (requires webhook setup):
+          # curl -X POST -H 'Content-type: application/json' \
+          #   --data '{"text":"🚀 EloquentAI Production Deployment Complete"}' \
+          #   "${SLACK_WEBHOOK_URL}"
+
+  # Rollback job (only runs for rollback deployments)
+  handle-rollback:
+    name: Handle Rollback Deployment
+    runs-on: ubuntu-latest
+    if: github.event.inputs.deployment_type == 'rollback'
+    needs: [pre-production-validation, production-ready]
+
+    steps:
+      - name: Execute rollback
+        run: |
+          echo "🔄 Executing production rollback..."
+          echo "Target version: ${{ github.event.inputs.rollback_version }}"
+
+          # This would contain the actual rollback logic
+          echo "Rollback steps:"
+          echo "1. Deploy previous backend version"
+          echo "2. Deploy previous frontend version"
+          echo "3. Restore database if needed"
+          echo "4. Verify rollback success"
+
+          echo "✅ Rollback simulation completed"

@@ -70,7 +70,7 @@ services:
       dockerfile: Dockerfile
       target: production
     environment:
-      - DATABASE_URL=postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
       - REDIS_URL=redis://:${REDIS_PASSWORD}@redis:6379
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
       - PINECONE_API_KEY=${PINECONE_API_KEY}

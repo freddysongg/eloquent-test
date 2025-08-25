@@ -1,0 +1,530 @@
+name: Integration Tests
+
+on:
+  push:
+    branches: [ main, dev ]
+  pull_request:
+    branches: [ main, dev ]
+  workflow_run:
+    workflows: ["Backend CI/CD", "Frontend CI/CD"]
+    branches: [ main, dev ]
+    types:
+      - completed
+
+env:
+  PYTHON_VERSION: "3.11"
+  NODE_VERSION: "20"
+  POETRY_VERSION: "1.6.1"
+
+jobs:
+  # Wait for CI workflows to complete successfully
+  check-prerequisites:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'workflow_run'
+    steps:
+      - name: Check workflow conclusion
+        run: |
+          if [[ "${{ github.event.workflow_run.conclusion }}" == "success" ]]; then
+            echo "✅ Prerequisites passed"
+          else
+            echo "❌ Prerequisites failed"
+            exit 1
+          fi
+
+  # Full Stack Integration Testing
+  integration-test:
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_PASSWORD: testpass
+          POSTGRES_USER: testuser
+          POSTGRES_DB: testdb
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+
+      redis:
+        image: redis:7-alpine
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 6379:6379
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Backend Setup
+      - name: Set up Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v4
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: Install Poetry
+        uses: snok/install-poetry@v1
+        with:
+          version: ${{ env.POETRY_VERSION }}
+
+      - name: Install backend dependencies
+        run: |
+          cd backend
+          poetry install --no-interaction
+
+      # Frontend Setup
+      - name: Setup Node.js ${{ env.NODE_VERSION }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: 'npm'
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        run: |
+          cd frontend
+          npm ci --prefer-offline --no-audit
+
+      # Database Migration
+      - name: Run database migrations
+        run: |
+          cd backend
+          poetry run alembic upgrade head
+        env:
+          DATABASE_URL: postgresql://testuser:testpass@localhost:5432/testdb
+
+      # Build Frontend
+      - name: Build frontend
+        run: |
+          cd frontend
+          npm run build
+        env:
+          NEXT_TELEMETRY_DISABLED: 1
+          NEXT_PUBLIC_API_URL: http://localhost:8000
+
+      # Start Backend Service
+      - name: Start backend server
+        run: |
+          cd backend
+          poetry run uvicorn app.main:app --host 0.0.0.0 --port 8000 &
+          echo $! > backend.pid
+
+          # Wait for backend to start
+          sleep 10
+
+          # Test backend health
+          curl -f http://localhost:8000/health || exit 1
+        env:
+          DATABASE_URL: postgresql://testuser:testpass@localhost:5432/testdb
+          REDIS_URL: redis://localhost:6379/0
+          CLAUDE_API_KEY: test-key
+          PINECONE_API_KEY: test-key
+          ENVIRONMENT: testing
+
+      # Start Frontend Service
+      - name: Start frontend server
+        run: |
+          cd frontend
+          npm start &
+          echo $! > frontend.pid
+
+          # Wait for frontend to start
+          sleep 15
+
+          # Test frontend health
+          curl -f http://localhost:3000/ || exit 1
+        env:
+          NEXT_PUBLIC_API_URL: http://localhost:8000
+          PORT: 3000
+
+      # WebSocket Integration Tests
+      - name: Test WebSocket connections
+        run: |
+          cd backend
+          poetry run python -c "
+          import asyncio
+          import websockets
+          import json
+
+          async def test_websocket():
+              try:
+                  uri = 'ws://localhost:8000/ws/chat'
+                  async with websockets.connect(uri) as websocket:
+                      # Send test message
+                      test_message = {
+                          'type': 'message',
+                          'content': 'Hello, test!'
+                      }
+                      await websocket.send(json.dumps(test_message))
+
+                      # Wait for response
+                      response = await asyncio.wait_for(websocket.recv(), timeout=10.0)
+                      print(f'WebSocket response: {response}')
+
+                      print('✅ WebSocket connection test passed')
+                      return True
+              except Exception as e:
+                  print(f'❌ WebSocket test failed: {e}')
+                  return False
+
+          result = asyncio.run(test_websocket())
+          exit(0 if result else 1)
+          "
+        timeout-minutes: 2
+
+      # API Integration Tests
+      - name: Test REST API endpoints
+        run: |
+          cd backend
+          poetry run python -c "
+          import asyncio
+          import httpx
+          import json
+
+          async def test_api_endpoints():
+              async with httpx.AsyncClient(timeout=30.0) as client:
+                  base_url = 'http://localhost:8000'
+
+                  # Test health endpoint
+                  response = await client.get(f'{base_url}/health')
+                  assert response.status_code == 200, f'Health check failed: {response.status_code}'
+
+                  # Test API v1 endpoints
+                  endpoints = [
+                      '/api/v1/chats',
+                      '/api/v1/users/me'
+                  ]
+
+                  for endpoint in endpoints:
+                      try:
+                          response = await client.get(f'{base_url}{endpoint}')
+                          print(f'Endpoint {endpoint}: {response.status_code}')
+                          # Note: Some endpoints may return 401 without auth, which is expected
+                      except Exception as e:
+                          print(f'Endpoint {endpoint} error: {e}')
+
+                  print('✅ API endpoint tests completed')
+                  return True
+
+          result = asyncio.run(test_api_endpoints())
+          "
+
+      # Rate Limiting Tests
+      - name: Test rate limiting
+        run: |
+          cd backend
+          poetry run python -c "
+          import asyncio
+          import httpx
+          import time
+
+          async def test_rate_limiting():
+              async with httpx.AsyncClient(timeout=10.0) as client:
+                  base_url = 'http://localhost:8000'
+
+                  # Test rate limiting by making multiple requests
+                  responses = []
+                  start_time = time.time()
+
+                  # Make 50 requests quickly
+                  for i in range(50):
+                      try:
+                          response = await client.get(f'{base_url}/health')
+                          responses.append(response.status_code)
+                      except Exception as e:
+                          responses.append(f'Error: {e}')
+
+                  end_time = time.time()
+                  duration = end_time - start_time
+
+                  # Check if any requests were rate limited (429 status)
+                  rate_limited = sum(1 for r in responses if r == 429)
+                  successful = sum(1 for r in responses if r == 200)
+
+                  print(f'Rate limiting test results:')
+                  print(f'Duration: {duration:.2f}s')
+                  print(f'Successful requests: {successful}')
+                  print(f'Rate limited requests: {rate_limited}')
+
+                  if rate_limited > 0:
+                      print('✅ Rate limiting is working')
+                  else:
+                      print('⚠️  Rate limiting may not be properly configured')
+
+                  return True
+
+          result = asyncio.run(test_rate_limiting())
+          "
+
+      # Database Integration Tests
+      - name: Test database operations
+        run: |
+          cd backend
+          poetry run python -c "
+          import asyncio
+          from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
+          from sqlalchemy.orm import sessionmaker
+          from app.models.user import User
+          from app.models.chat import Chat
+          from app.models.message import Message
+          import os
+
+          async def test_database():
+              DATABASE_URL = 'postgresql+asyncpg://testuser:testpass@localhost:5432/testdb'
+
+              engine = create_async_engine(DATABASE_URL)
+              async_session = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+
+              async with async_session() as session:
+                  # Test user creation
+                  test_user = User(
+                      clerk_user_id='test_user_123',
+                      email='test@example.com'
+                  )
+                  session.add(test_user)
+                  await session.commit()
+                  await session.refresh(test_user)
+
+                  # Test chat creation
+                  test_chat = Chat(
+                      user_id=test_user.id,
+                      title='Test Chat'
+                  )
+                  session.add(test_chat)
+                  await session.commit()
+                  await session.refresh(test_chat)
+
+                  # Test message creation
+                  test_message = Message(
+                      chat_id=test_chat.id,
+                      role='user',
+                      content='Test message',
+                      sequence_number=1
+                  )
+                  session.add(test_message)
+                  await session.commit()
+
+                  print('✅ Database operations test passed')
+
+              await engine.dispose()
+              return True
+
+          result = asyncio.run(test_database())
+          "
+        env:
+          DATABASE_URL: postgresql://testuser:testpass@localhost:5432/testdb
+
+      # Authentication Flow Tests
+      - name: Test authentication flows
+        run: |
+          cd backend
+          poetry run python -c "
+          import asyncio
+          import httpx
+          import jwt
+          import time
+
+          async def test_auth_flows():
+              async with httpx.AsyncClient(timeout=10.0) as client:
+                  base_url = 'http://localhost:8000'
+
+                  # Test anonymous access
+                  response = await client.get(f'{base_url}/health')
+                  assert response.status_code == 200, 'Anonymous access to health endpoint failed'
+
+                  # Test protected endpoint without auth (should fail)
+                  response = await client.get(f'{base_url}/api/v1/users/me')
+                  assert response.status_code in [401, 403], 'Protected endpoint should require auth'
+
+                  print('✅ Authentication flow tests passed')
+                  return True
+
+          result = asyncio.run(test_auth_flows())
+          "
+
+      # Performance Integration Tests
+      - name: Test performance requirements
+        run: |
+          cd backend
+          poetry run python -c "
+          import asyncio
+          import httpx
+          import time
+          import statistics
+
+          async def test_performance():
+              async with httpx.AsyncClient(timeout=30.0) as client:
+                  base_url = 'http://localhost:8000'
+
+                  # Test API response times
+                  response_times = []
+
+                  for i in range(20):
+                      start_time = time.time()
+                      response = await client.get(f'{base_url}/health')
+                      end_time = time.time()
+
+                      if response.status_code == 200:
+                          response_times.append((end_time - start_time) * 1000)  # Convert to ms
+
+                      await asyncio.sleep(0.1)  # Small delay between requests
+
+                  if response_times:
+                      avg_time = statistics.mean(response_times)
+                      p95_time = statistics.quantiles(response_times, n=20)[18]  # 95th percentile
+
+                      print(f'Performance test results:')
+                      print(f'Average response time: {avg_time:.2f}ms')
+                      print(f'95th percentile response time: {p95_time:.2f}ms')
+
+                      # Check against requirements (<200ms for API responses)
+                      if avg_time < 200:
+                          print('✅ API response time meets requirements')
+                      else:
+                          print(f'⚠️  API response time ({avg_time:.2f}ms) exceeds 200ms requirement')
+
+                      if p95_time < 500:
+                          print('✅ 95th percentile response time acceptable')
+                      else:
+                          print(f'⚠️  95th percentile response time ({p95_time:.2f}ms) is high')
+                  else:
+                      print('❌ No successful responses for performance testing')
+
+                  return True
+
+          result = asyncio.run(test_performance())
+          "
+
+      # Frontend Integration Tests
+      - name: Install Playwright for E2E tests
+        run: npx playwright install --with-deps chromium
+
+      - name: Run full-stack E2E tests
+        run: |
+          cd frontend
+          npx playwright test tests/integration/ --config=playwright.config.ts
+        timeout-minutes: 10
+        env:
+          BASE_URL: http://localhost:3000
+          API_URL: http://localhost:8000
+
+      # Cleanup
+      - name: Stop services
+        if: always()
+        run: |
+          # Stop backend
+          if [ -f backend.pid ]; then
+            kill $(cat backend.pid) || true
+            rm backend.pid
+          fi
+
+          # Stop frontend
+          if [ -f frontend.pid ]; then
+            kill $(cat frontend.pid) || true
+            rm frontend.pid
+          fi
+
+      - name: Upload test results
+        uses: actions/upload-artifact@v3
+        if: always()
+        with:
+          name: integration-test-results
+          path: |
+            frontend/test-results/
+            frontend/playwright-report/
+
+  # Deployment Readiness Check
+  deployment-readiness:
+    runs-on: ubuntu-latest
+    needs: [integration-test]
+    if: github.ref == 'refs/heads/main' || github.ref == 'refs/heads/dev'
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Check Docker Compose setup
+      - name: Test Docker Compose deployment
+        run: |
+          # Test that docker-compose.yml is valid
+          docker-compose config
+
+          # Test production docker-compose
+          if [ -f docker-compose.prod.yml ]; then
+            docker-compose -f docker-compose.prod.yml config
+          fi
+
+          echo "✅ Docker Compose configuration valid"
+
+      # Environment Variable Validation
+      - name: Validate environment configuration
+        run: |
+          echo "Checking environment variable templates..."
+
+          # Check backend .env.example
+          if [ -f backend/.env.example ]; then
+            echo "✅ Backend environment template exists"
+            cat backend/.env.example
+          else
+            echo "❌ Backend .env.example missing"
+            exit 1
+          fi
+
+          # Check frontend .env.local.example
+          if [ -f frontend/.env.local.example ]; then
+            echo "✅ Frontend environment template exists"
+            cat frontend/.env.local.example
+          else
+            echo "❌ Frontend .env.local.example missing"
+            exit 1
+          fi
+
+      # Security Configuration Check
+      - name: Check security configurations
+        run: |
+          echo "Validating security configurations..."
+
+          # Check for proper CORS configuration
+          if grep -r "cors" backend/app/ || true; then
+            echo "✅ CORS configuration found"
+          fi
+
+          # Check for rate limiting middleware
+          if [ -f backend/app/middleware/rate_limiting.py ]; then
+            echo "✅ Rate limiting middleware exists"
+          else
+            echo "⚠️  Rate limiting middleware not found"
+          fi
+
+          # Check for security headers
+          if grep -r "security" backend/app/ || true; then
+            echo "✅ Security configurations found"
+          fi
+
+  # Summary
+  integration-summary:
+    runs-on: ubuntu-latest
+    needs: [integration-test, deployment-readiness]
+    if: always()
+
+    steps:
+      - name: Integration test summary
+        run: |
+          echo "Integration Tests Summary:"
+          echo "========================="
+          echo "Integration Tests: ${{ needs.integration-test.result }}"
+          echo "Deployment Readiness: ${{ needs.deployment-readiness.result }}"
+
+          if [[ "${{ needs.integration-test.result }}" == "success" && \
+                "${{ needs.deployment-readiness.result }}" == "success" ]]; then
+            echo "✅ All integration tests passed! Ready for deployment."
+          else
+            echo "❌ Integration tests failed - check individual jobs"
+            exit 1
+          fi

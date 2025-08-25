@@ -1,65 +1,25 @@
-'use client';
+"use client";
 
-import { useState } from 'react';
+import { useChatManager } from "./use-chat-manager";
 
-// TODO: Replace with actual message types
-interface Message {
-  id: string;
-  role: 'user' | 'assistant';
-  content: string;
-  timestamp: Date;
-}
-
-// eslint-disable-next-line @typescript-eslint/no-unused-vars
+/**
+ * Legacy useChat hook that now delegates to useChatManager.
+ * Maintains backward compatibility while using the new chat management system.
+ */
 export function useChat(chatId: string | null) {
-  const [messages, setMessages] = useState<Message[]>([]);
-  const [isLoading, setIsLoading] = useState(false);
-  const [isStreaming, setIsStreaming] = useState(false);
+  const chatManager = useChatManager();
 
-  // chatId will be used to fetch/send messages to the specific chat
-  // when the actual API implementation is completed
-  const sendMessage = async (content: string) => {
-    // Add user message immediately
-    const userMessage: Message = {
-      id: `user-${Date.now()}`,
-      role: 'user',
-      content,
-      timestamp: new Date(),
-    };
-    
-    setMessages(prev => [...prev, userMessage]);
-    setIsLoading(true);
-    setIsStreaming(true);
-
-    try {
-      // TODO: Implement actual API call to backend
-      // Will use chatId to send message to the correct chat endpoint
-      // e.g., POST /api/chats/${chatId}/messages
-      // Simulate API delay
-      await new Promise(resolve => setTimeout(resolve, 1000));
-      
-      // Simulate assistant response
-      const assistantMessage: Message = {
-        id: `assistant-${Date.now()}`,
-        role: 'assistant',
-        content: 'This is a placeholder response. The Integration Agent will implement the actual Claude API streaming.',
-        timestamp: new Date(),
-      };
-      
-      setMessages(prev => [...prev, assistantMessage]);
-    } catch (error) {
-      console.error('Failed to send message:', error);
-      // TODO: Handle error state
-    } finally {
-      setIsLoading(false);
-      setIsStreaming(false);
-    }
-  };
+  // If a specific chatId is provided and it's different from current, select it
+  if (chatId && chatId !== chatManager.currentChatId) {
+    chatManager.selectChat(chatId);
+  }
 
   return {
-    messages,
-    isLoading,
-    isStreaming,
-    sendMessage,
+    messages: chatManager.messages,
+    isLoading: chatManager.isLoading,
+    isStreaming: chatManager.isStreaming,
+    sendMessage: chatManager.sendMessage,
+    error: chatManager.error,
+    clearError: chatManager.clearError,
   };
 }

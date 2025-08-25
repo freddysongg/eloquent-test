@@ -1,9 +1,9 @@
-'use client';
+"use client";
 
-import { useState, KeyboardEvent } from 'react';
-import { Button } from '@/components/ui/button';
-import { Textarea } from '@/components/ui/textarea';
-import { SendIcon } from 'lucide-react';
+import { useState, KeyboardEvent } from "react";
+import { Button } from "@/components/ui/button";
+import { Textarea } from "@/components/ui/textarea";
+import { SendIcon } from "lucide-react";
 
 interface MessageInputProps {
   onSendMessage: (message: string) => void;
@@ -11,18 +11,22 @@ interface MessageInputProps {
   placeholder?: string;
 }
 
-export function MessageInput({ onSendMessage, disabled, placeholder }: MessageInputProps) {
-  const [message, setMessage] = useState('');
+export function MessageInput({
+  onSendMessage,
+  disabled,
+  placeholder,
+}: MessageInputProps) {
+  const [message, setMessage] = useState("");
 
   const handleSend = () => {
     if (message.trim() && !disabled) {
       onSendMessage(message.trim());
-      setMessage('');
+      setMessage("");
     }
   };
 
   const handleKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
+    if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       handleSend();
     }
