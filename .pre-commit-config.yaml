@@ -82,6 +82,7 @@ repos:
         exclude: |
           (?x)^(
             .*\.lock$|
+            .*\.tsbuildinfo$|
             frontend/node_modules/.*|
             backend/htmlcov/.*|
             backend/\.flake8$
@@ -92,6 +93,7 @@ repos:
         exclude: |
           (?x)^(
             .*\.md$|
+            .*\.tsbuildinfo$|
             frontend/node_modules/.*|
             backend/htmlcov/.*|
             backend/\.flake8$
