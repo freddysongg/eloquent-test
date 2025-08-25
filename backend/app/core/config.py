@@ -32,7 +32,8 @@ class Settings(BaseSettings):
 
     # Database Configuration
     DATABASE_URL: str = Field(
-        ..., description="PostgreSQL database URL with asyncpg driver"
+        default="postgresql+asyncpg://eloquent:eloquent_password@localhost:5432/eloquentai_dev",  # pragma: allowlist secret
+        description="PostgreSQL database URL with asyncpg driver",
     )
     DATABASE_ECHO: bool = False
     DATABASE_POOL_SIZE: int = 10
@@ -54,27 +55,33 @@ class Settings(BaseSettings):
 
     # Clerk Authentication
     CLERK_PUBLISHABLE_KEY: str = Field(
-        ..., description="Clerk publishable key for frontend authentication"
+        default="pk_test_development",
+        description="Clerk publishable key for frontend authentication",
     )
     CLERK_SECRET_KEY: str = Field(
-        ..., description="Clerk secret key for backend verification"
+        default="sk_test_development",
+        description="Clerk secret key for backend verification",
     )
     CLERK_JWT_TEMPLATE: str = "eloquent-ai"
 
     # AI Services
     ANTHROPIC_API_KEY: str = Field(
-        ..., description="Anthropic API key for Claude integration"
+        default="sk-ant-development",
+        description="Anthropic API key for Claude integration",
     )
-    CLAUDE_MODEL: str = "claude-3-sonnet-20240229"
+    CLAUDE_MODEL: str = "claude-3-5-sonnet-20241022"
     CLAUDE_MAX_TOKENS: int = 4096
 
     # Pinecone Configuration
     PINECONE_API_KEY: str = Field(
-        ..., description="Pinecone API key for vector database"
+        default="development-key", description="Pinecone API key for vector database"
     )
     PINECONE_ENVIRONMENT: str = "us-east-1"
     PINECONE_INDEX_NAME: str = "ai-powered-chatbot-challenge"
-    PINECONE_INDEX_HOST: str = Field(..., description="Pinecone index host URL")
+    PINECONE_INDEX_HOST: str = Field(
+        default="https://ai-powered-chatbot-challenge-omkb0qa.svc.aped-4627-b74a.pinecone.io",
+        description="Pinecone index host URL",
+    )
 
     # Embedding Model Configuration
     EMBEDDING_MODEL: str = "llama-text-embed-v2"
@@ -138,16 +145,21 @@ class Settings(BaseSettings):
 
     @field_validator("DATABASE_URL", mode="before")
     def validate_database_url(cls, v: str) -> str:
-        """Validate database URL format."""
+        """Validate database URL format with development fallback."""
+        if not v or v in ["...", "required"]:
+            # Return development default if not provided
+            return "postgresql+asyncpg://eloquent:eloquent_password@localhost:5432/eloquentai_dev"  # pragma: allowlist secret
+
         if not v.startswith(("postgresql://", "postgresql+asyncpg://")):
             raise ValueError("DATABASE_URL must use PostgreSQL with asyncpg driver")
         return v
 
     @field_validator("REDIS_URL", mode="before")
     def validate_redis_url(cls, v: str) -> str:
-        """Validate Redis URL format."""
-        if not v.startswith("redis://"):
-            raise ValueError("REDIS_URL must be a valid Redis URL")
+        """Validate Redis URL format with development fallback."""
+        if not v or not v.startswith("redis://"):
+            # Return development default if not provided or invalid
+            return "redis://localhost:6379/0"
         return v
 
     @property

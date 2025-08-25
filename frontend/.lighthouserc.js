@@ -17,7 +17,7 @@ module.exports = {
         "categories:accessibility": ["error", { minScore: 0.9 }],
         "categories:best-practices": ["error", { minScore: 0.8 }],
         "categories:seo": ["error", { minScore: 0.8 }],
-        "categories:pwa": "off", // PWA not required for this project
+        "categories:pwa": "off",
 
         // Core Web Vitals
         "first-contentful-paint": ["error", { maxNumericValue: 2000 }],

@@ -182,7 +182,7 @@ jobs:
       - name: Upload coverage reports
         uses: codecov/codecov-action@v5
         with:
-          file: ./frontend/coverage/clover.xml
+          files: ./frontend/coverage/clover.xml
           flags: frontend
           name: frontend-coverage
           fail_ci_if_error: false

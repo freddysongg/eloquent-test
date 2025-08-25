@@ -198,8 +198,8 @@ jobs:
 
                   # Test API v1 endpoints
                   endpoints = [
-                      '/api/v1/chats',
-                      '/api/v1/users/me'
+                      '/v1/chats',
+                      '/v1/users/me'
                   ]
 
                   for endpoint in endpoints:
@@ -340,7 +340,7 @@ jobs:
                   assert response.status_code == 200, 'Anonymous access to health endpoint failed'
 
                   # Test protected endpoint without auth (should fail)
-                  response = await client.get(f'{base_url}/api/v1/users/me')
+                  response = await client.get(f'{base_url}/v1/users/me')
                   assert response.status_code in [401, 403], 'Protected endpoint should require auth'
 
                   print('✅ Authentication flow tests passed')

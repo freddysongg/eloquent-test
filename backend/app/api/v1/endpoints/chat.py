@@ -74,9 +74,25 @@ async def list_chats(
     try:
         chat_service = ChatService(db)
 
-        # TODO: Implement chat listing in ChatRepository
-        # For now return empty list as placeholder
-        return {"data": {"chats": [], "total": 0}, "error": None}
+        # Get chats for authenticated user or anonymous session
+        if current_user:
+            # Authenticated user - get their chats
+            chats = await chat_service.chat_repository.list_by_user(
+                user_id=current_user.id, limit=50, include_archived=False
+            )
+        else:
+            # Anonymous user - get chats by session/correlation ID
+            chats = await chat_service.chat_repository.list_by_session(
+                session_id=correlation_id, limit=50, include_archived=False
+            )
+
+        # Convert chats to response format
+        chat_data = []
+        for chat in chats:
+            chat_dict = chat.to_dict(exclude={"chat_metadata"}, include_messages=False)
+            chat_data.append(chat_dict)
+
+        return {"data": {"chats": chat_data, "total": len(chat_data)}, "error": None}
 
     except Exception as e:
         logger.error(

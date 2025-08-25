@@ -22,7 +22,11 @@ class RedisClient:
     """Async Redis client for caching and session management."""
 
     def __init__(self) -> None:
-        """Initialize Redis connection pool."""
+        """Initialize Redis connection pool with graceful degradation."""
+        self._mock_mode = False
+        self.redis: Optional[redis.Redis] = None
+        self.pool: Optional[redis.ConnectionPool] = None
+
         try:
             self.pool = redis.ConnectionPool.from_url(
                 settings.REDIS_URL,
@@ -40,9 +44,18 @@ class RedisClient:
 
         except Exception as e:
             logger.error(f"Failed to initialize Redis client: {str(e)}")
-            raise ExternalServiceException(
-                "Redis", f"Client initialization failed: {str(e)}"
-            )
+
+            # In development mode, fall back to mock mode instead of failing
+            if settings.ENVIRONMENT == "development":
+                logger.warning("Falling back to Redis mock mode for development")
+                self._mock_mode = True
+                self.redis = None
+                self.pool = None
+                self._mock_cache: Dict[str, Any] = {}
+            else:
+                raise ExternalServiceException(
+                    "Redis", f"Client initialization failed: {str(e)}"
+                )
 
     async def get(self, key: str, correlation_id: str = "") -> Optional[str]:
         """
@@ -58,7 +71,19 @@ class RedisClient:
         Raises:
             ExternalServiceException: If Redis operation fails
         """
+        if self._mock_mode:
+            value = self._mock_cache.get(key)
+            logger.debug(
+                f"Redis MOCK GET: {key} -> {'found' if value else 'not found'}",
+                extra={"correlation_id": correlation_id},
+            )
+            return value
+
         try:
+            # Ensure Redis client is available
+            if self.redis is None:
+                raise ExternalServiceException("Redis", "Client not initialized")
+
             value = await self.redis.get(key)
 
             logger.debug(
@@ -101,7 +126,19 @@ class RedisClient:
         Raises:
             ExternalServiceException: If Redis operation fails
         """
+        if self._mock_mode:
+            self._mock_cache[key] = value
+            logger.debug(
+                f"Redis MOCK SET: {key} (TTL: {expiration}s) -> success",
+                extra={"correlation_id": correlation_id},
+            )
+            return True
+
         try:
+            # Ensure Redis client is available
+            if self.redis is None:
+                raise ExternalServiceException("Redis", "Client not initialized")
+
             result = await self.redis.set(key, value, ex=expiration)
 
             logger.debug(
@@ -197,7 +234,21 @@ class RedisClient:
         Returns:
             True if key was deleted, False if key didn't exist
         """
+        if self._mock_mode:
+            existed = key in self._mock_cache
+            if existed:
+                del self._mock_cache[key]
+            logger.debug(
+                f"Redis MOCK DELETE: {key} -> {'success' if existed else 'key not found'}",
+                extra={"correlation_id": correlation_id},
+            )
+            return existed
+
         try:
+            # Ensure Redis client is available
+            if self.redis is None:
+                raise ExternalServiceException("Redis", "Client not initialized")
+
             result = await self.redis.delete(key)
 
             logger.debug(
@@ -240,7 +291,23 @@ class RedisClient:
         Raises:
             ExternalServiceException: If Redis operation fails
         """
+        if self._mock_mode:
+            current_value = int(self._mock_cache.get(key, "0"))
+            new_value = current_value + increment
+            self._mock_cache[key] = str(new_value)
+
+            logger.debug(
+                f"Redis MOCK INCREMENT: {key} +{increment} -> {new_value} (TTL: {expiration}s)",
+                extra={"correlation_id": correlation_id},
+            )
+
+            return new_value
+
         try:
+            # Ensure Redis client is available
+            if self.redis is None:
+                raise ExternalServiceException("Redis", "Client not initialized")
+
             # Use pipeline for atomic increment and expiration
             async with self.redis.pipeline(transaction=True) as pipe:
                 pipe.incrby(key, increment)
@@ -298,7 +365,14 @@ class RedisClient:
             )
 
             # Get TTL for reset time calculation
-            ttl = await self.redis.ttl(key)
+            if self._mock_mode:
+                ttl = window_seconds
+            else:
+                # Ensure Redis client is available
+                if self.redis is None:
+                    raise ExternalServiceException("Redis", "Client not initialized")
+
+                ttl = await self.redis.ttl(key)
 
             rate_limit_status = {
                 "allowed": current_count <= limit,
@@ -389,7 +463,15 @@ class RedisClient:
         Returns:
             True if Redis is healthy, False otherwise
         """
+        if self._mock_mode:
+            logger.debug("Redis health check: mock mode is healthy")
+            return True
+
         try:
+            # Ensure Redis client is available
+            if self.redis is None:
+                raise ExternalServiceException("Redis", "Client not initialized")
+
             # Simple ping test
             result = await self.redis.ping()
             return result is True
@@ -414,7 +496,25 @@ class RedisClient:
         Raises:
             ExternalServiceException: If Redis operation fails
         """
+        if self._mock_mode:
+            import fnmatch
+
+            matching_keys = [
+                key for key in self._mock_cache.keys() if fnmatch.fnmatch(key, pattern)
+            ]
+
+            logger.debug(
+                f"Redis MOCK KEYS: {pattern} -> {len(matching_keys)} keys found",
+                extra={"correlation_id": correlation_id},
+            )
+
+            return matching_keys
+
         try:
+            # Ensure Redis client is available
+            if self.redis is None:
+                raise ExternalServiceException("Redis", "Client not initialized")
+
             keys = await self.redis.keys(pattern)
 
             logger.debug(
@@ -437,8 +537,14 @@ class RedisClient:
 
     async def close(self) -> None:
         """Close Redis connection pool."""
+        if self._mock_mode:
+            self._mock_cache.clear()
+            logger.info("Redis mock mode cache cleared")
+            return
+
         try:
-            await self.redis.close()
+            if self.redis:
+                await self.redis.close()
             logger.info("Redis connection pool closed")
 
         except Exception as e:

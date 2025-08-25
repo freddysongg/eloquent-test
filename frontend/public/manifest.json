@@ -1,0 +1,26 @@
+{
+  "name": "Eloquent AI",
+  "short_name": "EloquentAI",
+  "description": "AI-powered chatbot with RAG for fintech FAQ support",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#ffffff",
+  "theme_color": "#000000",
+  "orientation": "portrait-primary",
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/favicon.ico",
+      "sizes": "48x48",
+      "type": "image/x-icon"
+    }
+  ],
+  "categories": ["productivity", "business", "finance"],
+  "lang": "en",
+  "dir": "ltr"
+}

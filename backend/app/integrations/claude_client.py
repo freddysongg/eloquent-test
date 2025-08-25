@@ -28,11 +28,25 @@ class ClaudeClient:
 
     def __init__(self) -> None:
         """Initialize Claude API client."""
-        self.client = AsyncAnthropic(
-            api_key=settings.ANTHROPIC_API_KEY, timeout=60.0, max_retries=3
+        self._development_mode = (
+            settings.ENVIRONMENT == "development"
+            and settings.ANTHROPIC_API_KEY
+            in ["sk-ant-development", "development", "test"]
         )
-        self.model = settings.CLAUDE_MODEL
-        self.max_tokens = settings.CLAUDE_MAX_TOKENS
+
+        if self._development_mode:
+            logger.warning(
+                "Claude client in development mode - API calls will be mocked"
+            )
+            self.client = None
+            self.model = settings.CLAUDE_MODEL
+            self.max_tokens = settings.CLAUDE_MAX_TOKENS
+        else:
+            self.client = AsyncAnthropic(
+                api_key=settings.ANTHROPIC_API_KEY, timeout=60.0, max_retries=3
+            )
+            self.model = settings.CLAUDE_MODEL
+            self.max_tokens = settings.CLAUDE_MAX_TOKENS
 
         logger.info(f"Claude client initialized with model: {self.model}")
 
@@ -68,11 +82,23 @@ class ClaudeClient:
             },
         )
 
+        # Development mode mock streaming
+        if self._development_mode:
+            async for token in self._mock_stream_response(
+                messages, context, correlation_id
+            ):
+                yield token
+            return
+
         async def _stream_with_protection() -> List[str]:
             """Internal streaming function with error handling."""
             try:
                 # Build system prompt with context if provided
                 system_content = self._build_system_prompt(system_prompt, context)
+
+                # Ensure client is available
+                if self.client is None:
+                    raise ExternalServiceException("Claude", "Client not initialized")
 
                 # Create streaming request
                 stream = await self.client.messages.create(
@@ -221,9 +247,22 @@ class ClaudeClient:
             },
         )
 
+        # Development mode mock response
+        if self._development_mode:
+            mock_response = ""
+            async for token in self._mock_stream_response(
+                messages, context, correlation_id
+            ):
+                mock_response += token
+            return mock_response.strip()
+
         try:
             # Build system prompt with context if provided
             system_content = self._build_system_prompt(system_prompt, context)
+
+            # Ensure client is available
+            if self.client is None:
+                raise ExternalServiceException("Claude", "Client not initialized")
 
             # Make API request
             response = await self.client.messages.create(
@@ -482,19 +521,31 @@ class ClaudeClient:
 
         # Test basic API connectivity
         try:
+            if self._development_mode:
+                # Skip real API test in development mode
+                api_result = True
+                logger.info("Skipping real API connectivity test in development mode")
+            else:
 
-            async def _test_api() -> bool:
-                test_messages: List[MessageParam] = [
-                    {"role": "user", "content": "Health check"}
-                ]
-                response = await self.client.messages.create(
-                    model=self.model, max_tokens=5, messages=test_messages
+                async def _test_api() -> bool:
+                    test_messages: List[MessageParam] = [
+                        {"role": "user", "content": "Health check"}
+                    ]
+
+                    # Ensure client is available
+                    if self.client is None:
+                        raise ExternalServiceException(
+                            "Claude", "Client not initialized"
+                        )
+
+                    response = await self.client.messages.create(
+                        model=self.model, max_tokens=5, messages=test_messages
+                    )
+                    return bool(response.content)
+
+                api_result = await resilience_manager.execute_with_resilience(
+                    "claude_api", _test_api, correlation_id=correlation_id
                 )
-                return bool(response.content)
-
-            api_result = await resilience_manager.execute_with_resilience(
-                "claude_api", _test_api, correlation_id=correlation_id
-            )
 
             health_status["checks"] = health_status.get("checks", {})
             if isinstance(health_status["checks"], dict):
@@ -512,7 +563,7 @@ class ClaudeClient:
                 }
             health_status["status"] = "unhealthy"
 
-        # Test streaming functionality
+        # Test streaming functionality (uses mock in development mode)
         try:
             test_messages: List[MessageParam] = [{"role": "user", "content": "Test"}]
 
@@ -566,3 +617,68 @@ class ClaudeClient:
             )
 
         return health_status
+
+    async def _mock_stream_response(
+        self,
+        messages: List[MessageParam],
+        context: Optional[str],
+        correlation_id: str,
+    ) -> AsyncGenerator[str, None]:
+        """
+        Generate mock streaming response for development mode.
+
+        Args:
+            messages: Conversation messages
+            context: Optional RAG context
+            correlation_id: Request correlation ID
+
+        Yields:
+            Mock response tokens
+        """
+        logger.info(
+            "Generating mock streaming response for development",
+            extra={"correlation_id": correlation_id, "has_context": bool(context)},
+        )
+
+        # Generate context-aware response
+        if context:
+            mock_response = (
+                "Based on the provided information, I can help you with your fintech-related query. "
+                "For account security, it's important to use strong passwords and enable two-factor authentication. "
+                "Payment processing should always comply with industry standards like PCI DSS. "
+                "If you have specific questions about transactions, fees, or account verification, "
+                "I'm here to provide detailed assistance based on our knowledge base."
+            )
+        else:
+            # Simple response for testing
+            user_message = ""
+            if messages and len(messages) > 0:
+                last_message = messages[-1]
+                if isinstance(last_message, dict) and "content" in last_message:
+                    user_message = str(last_message["content"]).lower()
+
+            if "hello" in user_message or "hi" in user_message:
+                mock_response = (
+                    "Hello! I'm a development AI assistant. How can I help you today?"
+                )
+            elif "health" in user_message:
+                mock_response = "System is healthy and running in development mode."
+            elif "test" in user_message:
+                mock_response = (
+                    "This is a test response from the development mock service."
+                )
+            else:
+                mock_response = (
+                    "I'm a development AI assistant designed to help with fintech-related questions. "
+                    "I can assist with account management, payment processing, security best practices, "
+                    "and regulatory compliance. What would you like to know?"
+                )
+
+        # Simulate streaming by yielding tokens with small delays
+        import re
+
+        words = re.split(r"(\s+)", mock_response)
+
+        for word in words:
+            await asyncio.sleep(0.01)  # Small delay to simulate streaming
+            yield word

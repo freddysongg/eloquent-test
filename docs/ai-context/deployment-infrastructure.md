@@ -417,7 +417,7 @@ jobs:
         run: |
           pytest tests/integration/ -v
         env:
-          DATABASE_URL: postgresql://postgres:test@localhost:5432/test
+          DATABASE_URL: postgresql://postgres:test@localhost:5432/test  # pragma: allowlist secret
           REDIS_URL: redis://localhost:6379
           
       - name: Upload coverage

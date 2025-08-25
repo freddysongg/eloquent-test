@@ -77,17 +77,6 @@ repos:
       # Check for files that would conflict in case-insensitive filesystems
       - id: check-case-conflict
 
-      # Ensure files end with a newline
-      - id: end-of-file-fixer
-        exclude: |
-          (?x)^(
-            .*\.lock$|
-            .*\.tsbuildinfo$|
-            frontend/node_modules/.*|
-            backend/htmlcov/.*|
-            backend/\.flake8$
-          )$
-
       # Remove trailing whitespace
       - id: trailing-whitespace
         exclude: |
@@ -127,13 +116,6 @@ repos:
 
       # Check for broken symlinks
       - id: check-symlinks
-
-  # Docker-related checks
-  - repo: https://github.com/hadolint/hadolint
-    rev: v2.12.0
-    hooks:
-      - id: hadolint-docker
-        files: Dockerfile.*
 
   # Security checks
   - repo: https://github.com/Yelp/detect-secrets

@@ -12,6 +12,8 @@ import {
 } from "@/types/chat";
 
 const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+const WEBSOCKET_BASE_URL =
+  process.env.NEXT_PUBLIC_WEBSOCKET_URL || "ws://localhost:8000/ws";
 
 /**
  * API client class for handling HTTP requests to the backend
@@ -80,14 +82,14 @@ class ApiClient {
    * List user's chat conversations
    */
   async listChats(): Promise<ChatListResponse> {
-    return this.request<ChatListResponse>("/api/v1/chats/");
+    return this.request<ChatListResponse>("/v1/chats/");
   }
 
   /**
    * Create a new chat conversation
    */
   async createChat(): Promise<ChatResponse> {
-    return this.request<ChatResponse>("/api/v1/chats/", {
+    return this.request<ChatResponse>("/v1/chats/", {
       method: "POST",
     });
   }
@@ -96,7 +98,7 @@ class ApiClient {
    * Get specific chat with message history
    */
   async getChat(chatId: string): Promise<ChatDetailResponse> {
-    return this.request<ChatDetailResponse>(`/api/v1/chats/${chatId}`);
+    return this.request<ChatDetailResponse>(`/v1/chats/${chatId}`);
   }
 
   /**
@@ -106,13 +108,10 @@ class ApiClient {
     chatId: string,
     request: SendMessageRequest,
   ): Promise<SendMessageResponse> {
-    return this.request<SendMessageResponse>(
-      `/api/v1/chats/${chatId}/messages`,
-      {
-        method: "POST",
-        body: JSON.stringify(request),
-      },
-    );
+    return this.request<SendMessageResponse>(`/v1/chats/${chatId}/messages`, {
+      method: "POST",
+      body: JSON.stringify(request),
+    });
   }
 
   /**
@@ -122,7 +121,7 @@ class ApiClient {
     chatId: string,
     request: SendMessageRequest,
   ): Promise<ReadableStream<Uint8Array>> {
-    const url = `${this.baseUrl}/api/v1/chats/${chatId}/messages`;
+    const url = `${this.baseUrl}/v1/chats/${chatId}/messages`;
     const headers = await this.getAuthHeaders();
 
     const response = await fetch(url, {
@@ -141,6 +140,23 @@ class ApiClient {
 
     return response.body;
   }
+}
+
+/**
+ * Build WebSocket URL for chat connections
+ */
+export function buildWebSocketUrl(
+  chatId: string = "default",
+  userId: string = "anonymous",
+  correlationId?: string,
+): string {
+  const baseUrl = WEBSOCKET_BASE_URL;
+  const params = new URLSearchParams({
+    user_id: userId,
+    correlation_id: correlationId || Date.now().toString(),
+  });
+
+  return `${baseUrl}/${chatId}?${params.toString()}`;
 }
 
 // Export singleton instance

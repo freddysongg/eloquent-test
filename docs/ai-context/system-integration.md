@@ -89,7 +89,7 @@ class PineconeService:
 **Purpose**: Primary LLM for response generation with streaming support
 
 **Configuration**:
-- **Model**: Claude-3-Sonnet (production) / Claude-3-Haiku (development)
+- **Model**: Claude-3-5-Sonnet (production) / Claude-3-Haiku (development)
 - **Max Tokens**: 8000 (optimized for context window)
 - **Streaming**: Token-by-token streaming via WebSocket
 - **Rate Limits**: 10 requests/minute per user
@@ -800,8 +800,8 @@ class ClaudeService:
         """LLM generation with fallback models"""
         
         try:
-            # Primary: Claude-3-Sonnet
-            return await self.claude_client.generate(prompt, model="claude-3-sonnet")
+            # Primary: Claude-3-5-Sonnet
+            return await self.claude_client.generate(prompt, model="claude-3-5-sonnet")
             
         except RateLimitException:
             logger.warning("Claude rate limited, trying Haiku")

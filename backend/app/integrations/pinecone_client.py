@@ -27,6 +27,24 @@ class PineconeClient:
 
     def __init__(self) -> None:
         """Initialize Pinecone client with pre-configured index."""
+        self._development_mode = (
+            settings.ENVIRONMENT == "development"
+            and settings.PINECONE_API_KEY in ["development-key", "dev", "test"]
+        )
+
+        self.client: Optional[Pinecone] = None
+        self.index: Optional[Any] = None
+
+        if self._development_mode:
+            logger.warning(
+                "Pinecone client in development mode - API calls will be mocked"
+            )
+            self.client = None
+            self.index = None
+            self.index_name = settings.PINECONE_INDEX_NAME
+            self.index_host = settings.PINECONE_INDEX_HOST
+            return
+
         try:
             self.client = Pinecone(api_key=settings.PINECONE_API_KEY)
             self.index_name = settings.PINECONE_INDEX_NAME
@@ -39,9 +57,20 @@ class PineconeClient:
 
         except Exception as e:
             logger.error(f"Failed to initialize Pinecone client: {str(e)}")
-            raise ExternalServiceException(
-                "Pinecone", f"Client initialization failed: {str(e)}"
-            )
+            # In development, fall back to mock mode
+            if settings.ENVIRONMENT == "development":
+                logger.warning(
+                    "Falling back to development mode due to Pinecone connection failure"
+                )
+                self._development_mode = True
+                self.client = None
+                self.index = None
+                self.index_name = settings.PINECONE_INDEX_NAME
+                self.index_host = settings.PINECONE_INDEX_HOST
+            else:
+                raise ExternalServiceException(
+                    "Pinecone", f"Client initialization failed: {str(e)}"
+                )
 
     async def search_documents(
         self,
@@ -76,13 +105,24 @@ class PineconeClient:
             },
         )
 
+        # Development mode mock responses
+        if self._development_mode:
+            return self._mock_search_results(top_k, correlation_id)
+
         async def _perform_search() -> List[Dict[str, Any]]:
             """Internal search function with direct Pinecone API call."""
             try:
+                # Ensure index is available
+                if self.index is None:
+                    raise ExternalServiceException("Pinecone", "Index not initialized")
+
+                # Capture index reference for lambda
+                index_ref = self.index
+
                 # Perform vector search
                 search_response = await asyncio.get_event_loop().run_in_executor(
                     None,
-                    lambda: self.index.query(
+                    lambda: index_ref.query(
                         vector=query_embedding,
                         top_k=top_k,
                         filter=filter_metadata,
@@ -230,6 +270,10 @@ class PineconeClient:
             extra={"correlation_id": correlation_id, "text_length": len(text)},
         )
 
+        # Development mode mock embeddings
+        if self._development_mode:
+            return self._mock_text_embedding(text)
+
         # Check cache first (outside resilience pattern for speed)
         try:
             from app.integrations.redis_client import get_redis_client
@@ -323,11 +367,18 @@ class PineconeClient:
         )
 
         try:
+            # Ensure client is available
+            if self.client is None:
+                raise ExternalServiceException("Pinecone", "Client not initialized")
+
+            # Capture client reference for lambda
+            client_ref = self.client
+
             # Use Pinecone's embedding service via their Inference API
             # This uses the same API key as the vector database
             inference_response = await asyncio.get_event_loop().run_in_executor(
                 None,
-                lambda: self.client.inference.embed(
+                lambda: client_ref.inference.embed(
                     model=settings.EMBEDDING_MODEL, inputs=[text], parameters={}
                 ),
             )
@@ -850,9 +901,16 @@ class PineconeClient:
         )
 
         try:
+            # Ensure index is available
+            if self.index is None:
+                raise ExternalServiceException("Pinecone", "Index not initialized")
+
+            # Capture index reference for lambda
+            index_ref = self.index
+
             # Get index stats
             stats_response = await asyncio.get_event_loop().run_in_executor(
-                None, lambda: self.index.describe_index_stats()
+                None, lambda: index_ref.describe_index_stats()
             )
 
             stats = {
@@ -1068,3 +1126,122 @@ class PineconeClient:
         # TODO: Implement recency scoring when timestamp metadata available
 
         return min(score, 1.0)  # Cap at 1.0
+
+    def _mock_search_results(
+        self, top_k: int, correlation_id: str
+    ) -> List[Dict[str, Any]]:
+        """
+        Generate mock search results for development mode.
+
+        Args:
+            top_k: Number of results to return
+            correlation_id: Request correlation ID
+
+        Returns:
+            Mock search results with realistic structure
+        """
+        logger.info(
+            "Generating mock search results for development",
+            extra={"correlation_id": correlation_id, "top_k": top_k},
+        )
+
+        mock_documents = [
+            {
+                "id": "mock_doc_1",
+                "score": 0.95,
+                "content": "Account security is paramount in fintech. Use strong passwords and enable two-factor authentication.",
+                "metadata": {
+                    "category": "security",
+                    "source": "security_guide",
+                    "title": "Account Security Best Practices",
+                },
+                "category": "security",
+                "source": "security_guide",
+                "title": "Account Security Best Practices",
+            },
+            {
+                "id": "mock_doc_2",
+                "score": 0.87,
+                "content": "Payment processing requires compliance with PCI DSS standards for handling card data securely.",
+                "metadata": {
+                    "category": "payment",
+                    "source": "compliance_docs",
+                    "title": "PCI DSS Compliance",
+                },
+                "category": "payment",
+                "source": "compliance_docs",
+                "title": "PCI DSS Compliance",
+            },
+            {
+                "id": "mock_doc_3",
+                "score": 0.82,
+                "content": "KYC (Know Your Customer) procedures help prevent fraud and ensure regulatory compliance.",
+                "metadata": {
+                    "category": "compliance",
+                    "source": "regulatory_guidance",
+                    "title": "KYC Requirements",
+                },
+                "category": "compliance",
+                "source": "regulatory_guidance",
+                "title": "KYC Requirements",
+            },
+            {
+                "id": "mock_doc_4",
+                "score": 0.76,
+                "content": "Transaction fees vary based on payment method, amount, and destination country.",
+                "metadata": {
+                    "category": "payment",
+                    "source": "fee_schedule",
+                    "title": "Fee Structure",
+                },
+                "category": "payment",
+                "source": "fee_schedule",
+                "title": "Fee Structure",
+            },
+            {
+                "id": "mock_doc_5",
+                "score": 0.71,
+                "content": "Account verification process includes identity document upload and address confirmation.",
+                "metadata": {
+                    "category": "account",
+                    "source": "user_guide",
+                    "title": "Account Verification",
+                },
+                "category": "account",
+                "source": "user_guide",
+                "title": "Account Verification",
+            },
+        ]
+
+        return mock_documents[:top_k]
+
+    def _mock_text_embedding(self, text: str) -> List[float]:
+        """
+        Generate deterministic mock embedding for development mode.
+
+        Args:
+            text: Text to embed
+
+        Returns:
+            Mock embedding vector (1024 dimensions)
+        """
+        import hashlib
+        import math
+
+        # Create deterministic but varied embeddings
+        text_hash = hashlib.md5(text.encode()).hexdigest()
+
+        embedding = []
+        for i in range(settings.EMBEDDING_DIMENSIONS):
+            # Use different parts of hash for variation
+            seed = int(text_hash[i % len(text_hash)], 16)
+            # Create sine wave pattern for smoother embeddings
+            value = math.sin(seed + i) * 0.5 + math.cos(seed * i) * 0.3
+            embedding.append(value)
+
+        # Normalize to unit vector
+        magnitude = np.linalg.norm(embedding)
+        if magnitude > 0:
+            embedding = [float(x / magnitude) for x in embedding]
+
+        return embedding
