@@ -1,4 +1,4 @@
-# Multi-stage Docker build for FastAPI backend - Optimized for App Runner
+# Multi-stage Docker build for FastAPI backend
 FROM python:3.12-slim as base
 
 # Set environment variables for optimal performance
