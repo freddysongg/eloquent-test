@@ -108,7 +108,12 @@ class Settings(BaseSettings):
 
     # CORS Settings
     CORS_ORIGINS: List[str] = Field(
-        default=["http://localhost:3000"], description="List of allowed CORS origins"
+        default=[
+            "http://localhost:3000",  # Local development
+            "https://eloquent-test.vercel.app",  # Production frontend
+            "https://*.vercel.app",  # Preview deployments
+        ],
+        description="List of allowed CORS origins",
     )
     CORS_ALLOW_CREDENTIALS: bool = True
     CORS_ALLOW_METHODS: List[str] = Field(

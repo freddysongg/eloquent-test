@@ -135,6 +135,42 @@ backend_logs/
 postgres_data/
 redis_data/
 
+# Terraform
+**/.terraform/*
+**/.terraform.lock.hcl
+
+# .tfstate files
+*.tfstate
+*.tfstate.*
+
+# Crash log files
+crash.log
+crash.*.log
+
+*.auto.tfvars
+*.auto.tfvars.json
+terraform.tfvars
+terraform.tfvars.json
+
+override.tf
+override.tf.json
+*_override.tf
+*_override.tf.json
+
+.terraformrc
+terraform.rc
+
+# Terraform plan files
+*.tfplan
+*.tfplan.*
+tfplan*
+
+# Deployment files with sensitive data
+.env.deployment
+**/secrets.tfvars
+
+terraform/docs/
+
 # SSL certificates (should be managed separately)
 nginx/ssl/
 
