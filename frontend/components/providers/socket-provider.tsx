@@ -103,7 +103,9 @@ export function SocketProvider({ children }: SocketProviderProps) {
         newSocket.onmessage = (event) => {
           try {
             const data = JSON.parse(event.data);
-            console.log("Received WebSocket message:", data);
+            const sanitizedData = sanitizeForLogging(data);
+            // Log as a JSON string to clearly indicate user input and avoid injection
+            console.log("Received WebSocket message (sanitized): " + JSON.stringify(sanitizedData));
 
             // Handle different message types
             switch (data.type) {
@@ -183,7 +185,6 @@ export function SocketProvider({ children }: SocketProviderProps) {
   );
 }
 
-export function useSocket() {
   const context = useContext(SocketContext);
   if (context === undefined) {
     throw new Error("useSocket must be used within a SocketProvider");
