@@ -13,6 +13,37 @@ import {
 import { useAuth } from "@/components/providers/auth-provider";
 import { buildWebSocketUrl } from "@/lib/api";
 
+function sanitizeForLogging(data: any): any {
+  if (data === null || data === undefined) return data;
+
+  if (typeof data !== "object") {
+    // Truncate long strings
+    return typeof data === "string" && data.length > 200
+      ? data.substring(0, 200) + "..."
+      : data;
+  }
+
+  if (Array.isArray(data)) {
+    return data.slice(0, 10).map(sanitizeForLogging); // Limit array size
+  }
+
+  const sanitized: any = {};
+  for (const [key, value] of Object.entries(data)) {
+    // Skip sensitive fields
+    if (
+      ["password", "token", "secret", "key", "auth"].some((sensitive) =>
+        key.toLowerCase().includes(sensitive),
+      )
+    ) {
+      sanitized[key] = "[REDACTED]";
+    } else {
+      sanitized[key] = sanitizeForLogging(value);
+    }
+  }
+
+  return sanitized;
+}
+
 interface SocketContextType {
   socket: WebSocket | null;
   isConnected: boolean;
@@ -105,7 +136,10 @@ export function SocketProvider({ children }: SocketProviderProps) {
             const data = JSON.parse(event.data);
             const sanitizedData = sanitizeForLogging(data);
             // Log as a JSON string to clearly indicate user input and avoid injection
-            console.log("Received WebSocket message (sanitized): " + JSON.stringify(sanitizedData));
+            console.log(
+              "Received WebSocket message (sanitized): " +
+                JSON.stringify(sanitizedData),
+            );
 
             // Handle different message types
             switch (data.type) {
@@ -119,10 +153,18 @@ export function SocketProvider({ children }: SocketProviderProps) {
                 // Handle typing indicators
                 break;
               case "error":
-                console.error("WebSocket message error:", data.error);
+                const sanitizedError =
+                  typeof data.error === "string"
+                    ? data.error.replace(/[\n\r]/g, "")
+                    : data.error;
+                console.error("WebSocket message error:", sanitizedError);
                 break;
               default:
-                console.log("Unknown WebSocket message type:", data.type);
+                const sanitizedType = String(data.type).replace(/[\n\r]/g, "");
+                console.log(
+                  "Unknown WebSocket message type (user input):",
+                  sanitizedType,
+                );
             }
           } catch (error) {
             console.error("Failed to parse WebSocket message:", error);
@@ -185,6 +227,7 @@ export function SocketProvider({ children }: SocketProviderProps) {
   );
 }
 
+export function useSocket() {
   const context = useContext(SocketContext);
   if (context === undefined) {
     throw new Error("useSocket must be used within a SocketProvider");
