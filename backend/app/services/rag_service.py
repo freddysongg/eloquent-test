@@ -5,11 +5,15 @@ Implements complete RAG pipeline with Pinecone vector search,
 embedding generation, and context optimization for AI responses.
 """
 
+import asyncio
+import hashlib
+import json
 import logging
-from typing import Any, Dict, List, Tuple
+import time
+from typing import Any, Dict, List, Optional, Tuple, cast
 
 from app.integrations.pinecone_client import PineconeClient
-from app.integrations.redis_client import get_redis_client
+from app.integrations.redis_client import RedisClient, get_redis_client
 from app.services.hybrid_search_service import HybridSearchService
 
 logger = logging.getLogger(__name__)
@@ -19,7 +23,7 @@ class RAGService:
     """Service for RAG pipeline operations with Pinecone and context management."""
 
     def __init__(self) -> None:
-        """Initialize RAG service with Pinecone client and hybrid search."""
+        """Initialize RAG service with optimized caching and fast retrieval."""
         self.pinecone_client = PineconeClient()
         self.hybrid_search = HybridSearchService(
             vector_weight=0.7,  # 70% vector similarity
@@ -28,7 +32,41 @@ class RAGService:
             max_context_tokens=8000,
         )
         self._index_initialized = False
-        logger.info("RAG service initialized with Pinecone client and hybrid search")
+        self._redis_client: Optional[RedisClient] = None
+
+        # Caching configuration
+        self.cache_ttl = 3600  # 1 hour cache for query results
+        self.fast_cache_ttl = 300  # 5 minute cache for frequently accessed results
+        self.embedding_cache_ttl = 7200  # 2 hour cache for embeddings
+
+        # Performance tracking
+        self.retrieval_times: List[float] = []
+        self.cache_hit_count = 0
+        self.cache_miss_count = 0
+
+        logger.info(
+            "RAG service initialized with optimized caching and performance tracking"
+        )
+
+    async def get_redis_client(self) -> Optional[Any]:
+        """Get Redis client for caching (lazy initialization)."""
+        if self._redis_client is None:
+            try:
+                self._redis_client = await get_redis_client()
+            except Exception as e:
+                logger.warning(f"Failed to initialize Redis client: {str(e)}")
+                self._redis_client = None
+        return self._redis_client
+
+    def _generate_cache_key(self, query: str, top_k: int, use_hybrid: bool) -> str:
+        """Generate cache key for query results."""
+        query_hash = hashlib.md5(query.lower().strip().encode()).hexdigest()
+        return f"rag:query:{query_hash}:{top_k}:{'hybrid' if use_hybrid else 'vector'}"
+
+    def _generate_embedding_cache_key(self, text: str) -> str:
+        """Generate cache key for embeddings."""
+        text_hash = hashlib.md5(text.lower().strip().encode()).hexdigest()
+        return f"rag:embedding:{text_hash}"
 
     async def retrieve_context(
         self,
@@ -36,6 +74,7 @@ class RAGService:
         top_k: int = 5,
         correlation_id: str = "",
         use_hybrid_search: bool = True,
+        use_cache: bool = True,
     ) -> List[Dict[str, Any]]:
         """
         Retrieve relevant context documents from Pinecone.
@@ -45,36 +84,70 @@ class RAGService:
             top_k: Number of documents to retrieve
             correlation_id: Request correlation ID
             use_hybrid_search: Whether to use hybrid search (default: True)
+            use_cache: Whether to use Redis caching for faster retrieval
 
         Returns:
             List of relevant document chunks with metadata
         """
+        start_time = time.time()
+
         logger.info(
-            f"Retrieving context for query",
+            f"Retrieving context with optimized pipeline",
             extra={
                 "correlation_id": correlation_id,
                 "query_length": len(query),
                 "top_k": top_k,
+                "use_cache": use_cache,
+                "use_hybrid": use_hybrid_search,
             },
         )
 
         try:
-            # Check cache first
-            redis_client = await get_redis_client()
-            cache_key = f"rag_context:{hash(query)}:{top_k}:{'hybrid' if use_hybrid_search else 'vector'}"
-            cached_results = await redis_client.get_json(cache_key, correlation_id)
-
-            if cached_results and "documents" in cached_results:
-                logger.info(
-                    f"Retrieved context from cache",
-                    extra={"correlation_id": correlation_id},
+            # Check cache first if enabled
+            if use_cache:
+                cache_hit = await self._try_cache_retrieval(
+                    query, top_k, use_hybrid_search, correlation_id
                 )
-                return cached_results["documents"]
+                if cache_hit:
+                    retrieval_time = time.time() - start_time
+                    self.retrieval_times.append(retrieval_time)
+                    self.cache_hit_count += 1
 
-            # Generate query embedding
-            query_embedding = await self.pinecone_client.embed_text(
-                query, correlation_id
-            )
+                    logger.info(
+                        f"Retrieved context from cache",
+                        extra={
+                            "correlation_id": correlation_id,
+                            "retrieval_time_ms": round(retrieval_time * 1000, 2),
+                            "cache_hit_rate": self.cache_hit_count
+                            / (self.cache_hit_count + self.cache_miss_count),
+                        },
+                    )
+                    return cache_hit
+
+            self.cache_miss_count += 1
+
+            # Parallel execution of embedding generation and index initialization
+            embedding_task = self._get_cached_embedding(query, correlation_id)
+
+            # Initialize hybrid search index if needed (separate task)
+            init_task = None
+            if use_hybrid_search and not self._index_initialized:
+                init_task = self._initialize_hybrid_search_index(correlation_id)
+
+            # Execute embedding task and init task in parallel if needed
+            if init_task:
+                results = await asyncio.gather(
+                    embedding_task, init_task, return_exceptions=True
+                )
+                query_embedding_result = results[0]
+            else:
+                query_embedding_result = await embedding_task
+
+            if isinstance(query_embedding_result, Exception):
+                raise query_embedding_result
+
+            # Type cast - we know it's List[float] after exception check
+            query_embedding = cast(List[float], query_embedding_result)
 
             # Search Pinecone for similar documents
             documents = await self.pinecone_client.search_documents(
@@ -115,24 +188,34 @@ class RAGService:
                 # Sort by enhanced score
                 enhanced_documents.sort(key=lambda x: x["enhanced_score"], reverse=True)
 
-            # Cache results for 5 minutes
-            cache_data: Dict[str, Any] = {"documents": enhanced_documents}
-            await redis_client.set_json(
-                cache_key,
-                cache_data,
-                expiration=300,
-                correlation_id=correlation_id,
-            )
-
             # Limit to requested top_k
             final_documents = enhanced_documents[:top_k]
 
+            # Cache results asynchronously
+            if use_cache:
+                asyncio.create_task(
+                    self._cache_results(
+                        query, top_k, use_hybrid_search, final_documents, correlation_id
+                    )
+                )
+
+            # Track performance metrics
+            retrieval_time = time.time() - start_time
+            self.retrieval_times.append(retrieval_time)
+
             logger.info(
-                f"Context retrieval completed",
+                f"Context retrieval completed with optimization",
                 extra={
                     "correlation_id": correlation_id,
                     "search_type": "hybrid" if use_hybrid_search else "vector_only",
                     "documents_found": len(final_documents),
+                    "retrieval_time_ms": round(retrieval_time * 1000, 2),
+                    "cache_hit_rate": (
+                        self.cache_hit_count
+                        / (self.cache_hit_count + self.cache_miss_count)
+                        if (self.cache_hit_count + self.cache_miss_count) > 0
+                        else 0
+                    ),
                     "avg_score": (
                         sum(
                             doc.get(
@@ -167,6 +250,138 @@ class RAGService:
             )
             # Return empty list on failure rather than raising
             return []
+
+    async def _try_cache_retrieval(
+        self, query: str, top_k: int, use_hybrid: bool, correlation_id: str
+    ) -> Optional[List[Dict[str, Any]]]:
+        """Try to retrieve results from cache."""
+        try:
+            redis_client = await self.get_redis_client()
+            if not redis_client:
+                return None
+
+            cache_key = self._generate_cache_key(query, top_k, use_hybrid)
+            cached_results = await redis_client.get_json(cache_key, correlation_id)
+
+            if cached_results and "documents" in cached_results:
+                return cached_results["documents"]
+            return None
+
+        except Exception as e:
+            logger.warning(
+                f"Cache retrieval failed: {str(e)}",
+                extra={"correlation_id": correlation_id},
+            )
+            return None
+
+    async def _get_cached_embedding(
+        self, text: str, correlation_id: str
+    ) -> List[float]:
+        """Get embedding from cache or generate new one."""
+        try:
+            redis_client = await self.get_redis_client()
+
+            if redis_client:
+                cache_key = self._generate_embedding_cache_key(text)
+                cached_embedding = await redis_client.get_json(
+                    cache_key, correlation_id
+                )
+
+                if cached_embedding and "embedding" in cached_embedding:
+                    return cached_embedding["embedding"]
+
+            # Generate new embedding
+            embedding = await self.pinecone_client.embed_text(text, correlation_id)
+
+            # Cache the embedding if Redis is available
+            if redis_client:
+                try:
+                    await redis_client.set_json(
+                        cache_key,
+                        {
+                            "embedding": embedding,
+                            "text_hash": hashlib.md5(text.encode()).hexdigest(),
+                        },
+                        expiration=self.embedding_cache_ttl,
+                        correlation_id=correlation_id,
+                    )
+                except Exception as cache_error:
+                    logger.warning(f"Failed to cache embedding: {str(cache_error)}")
+
+            return embedding
+
+        except Exception as e:
+            logger.error(
+                f"Embedding generation failed: {str(e)}",
+                extra={"correlation_id": correlation_id},
+            )
+            # Fallback to direct embedding generation
+            return await self.pinecone_client.embed_text(text, correlation_id)
+
+    async def _cache_results(
+        self,
+        query: str,
+        top_k: int,
+        use_hybrid: bool,
+        documents: List[Dict[str, Any]],
+        correlation_id: str,
+    ) -> None:
+        """Cache retrieval results."""
+        try:
+            redis_client = await self.get_redis_client()
+            if not redis_client:
+                return
+
+            cache_key = self._generate_cache_key(query, top_k, use_hybrid)
+            cache_data = {"documents": documents, "timestamp": time.time()}
+
+            # Use fast cache for frequently accessed queries
+            ttl = (
+                self.fast_cache_ttl
+                if len(self.retrieval_times) > 10
+                else self.cache_ttl
+            )
+
+            await redis_client.set_json(
+                cache_key,
+                cache_data,
+                expiration=ttl,
+                correlation_id=correlation_id,
+            )
+
+        except Exception as e:
+            logger.warning(
+                f"Failed to cache results: {str(e)}",
+                extra={"correlation_id": correlation_id},
+            )
+
+    def get_performance_metrics(self) -> Dict[str, Any]:
+        """Get RAG service performance metrics."""
+        if not self.retrieval_times:
+            return {
+                "avg_retrieval_time_ms": 0,
+                "cache_hit_rate": 0,
+                "total_retrievals": 0,
+            }
+
+        avg_time = sum(self.retrieval_times[-100:]) / len(
+            self.retrieval_times[-100:]
+        )  # Last 100 retrievals
+        total_requests = self.cache_hit_count + self.cache_miss_count
+        hit_rate = self.cache_hit_count / total_requests if total_requests > 0 else 0
+
+        return {
+            "avg_retrieval_time_ms": round(avg_time * 1000, 2),
+            "cache_hit_rate": round(hit_rate, 3),
+            "total_retrievals": len(self.retrieval_times),
+            "cache_hits": self.cache_hit_count,
+            "cache_misses": self.cache_miss_count,
+            "p95_retrieval_time_ms": (
+                round(sorted(self.retrieval_times[-100:])[-5] * 1000, 2)
+                if len(self.retrieval_times) >= 5
+                else 0
+            ),
+        }
 
     async def rerank_documents(
         self, query: str, documents: List[Dict[str, Any]], correlation_id: str = ""

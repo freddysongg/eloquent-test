@@ -17,6 +17,7 @@ from app.models.user import User
 from app.repositories.chat_repository import ChatRepository
 from app.repositories.message_repository import MessageRepository
 from app.services.rag_service import RAGService
+from app.services.response_cache_service import ResponseCacheService
 from app.services.streaming_service import StreamingService
 
 logger = logging.getLogger(__name__)
@@ -37,6 +38,7 @@ class ChatService:
         self.message_repository = MessageRepository(db)
         self.rag_service = RAGService()
         self.streaming_service = StreamingService()
+        self.response_cache = ResponseCacheService()
 
     async def create_chat(
         self,
@@ -99,7 +101,7 @@ class ChatService:
         correlation_id: str = "",
     ) -> AsyncGenerator[Dict[str, Any], None]:
         """
-        Process user message and stream AI response with RAG integration.
+        Process user message and stream AI response with RAG integration and caching.
 
         Args:
             chat_id: Chat conversation ID
@@ -113,7 +115,7 @@ class ChatService:
         user_id_str = str(user.id) if user else "anonymous"
 
         logger.info(
-            f"Processing message with RAG integration",
+            f"Processing message with RAG integration and caching",
             extra={
                 "correlation_id": correlation_id,
                 "chat_id": str(chat_id),
@@ -127,6 +129,97 @@ class ChatService:
         ai_response_content = ""
         retrieved_docs = []
         rag_metadata = {}
+        cache_used = False
+
+        try:
+            # 0. Check for query deduplication first
+            yield {
+                "type": "status",
+                "content": "Checking for duplicate queries...",
+                "step": "deduplication_check",
+            }
+
+            dedup_result = await self.response_cache.deduplicate_query(
+                query=message_content,
+                user_id=user_id_str,
+                correlation_id=correlation_id,
+            )
+
+            if dedup_result:
+                query_hash, event = dedup_result
+
+                yield {
+                    "type": "status",
+                    "content": "Similar query in progress, waiting for result...",
+                    "step": "waiting_for_dedup",
+                }
+
+                # Wait for existing query to complete
+                dedup_response = await self.response_cache.get_deduplicated_result(
+                    query_hash=query_hash,
+                    timeout=30.0,
+                    correlation_id=correlation_id,
+                )
+
+                if dedup_response:
+                    response_text, response_metadata = dedup_response
+
+                    # Save user message
+                    await self.message_repository.create(
+                        chat_id=chat_id,
+                        role=MessageRole.USER,
+                        content=message_content,
+                        correlation_id=correlation_id,
+                    )
+
+                    # Stream the deduplicated response
+                    yield {"type": "start", "content": "", "step": "streaming_cached"}
+
+                    # Stream response in chunks for smooth frontend rendering
+                    words = response_text.split()
+                    current_chunk = ""
+
+                    for i, word in enumerate(words):
+                        current_chunk += word + (" " if i < len(words) - 1 else "")
+
+                        # Send chunk every 3-4 words for smooth streaming
+                        if len(current_chunk.split()) >= 3 or i == len(words) - 1:
+                            yield {
+                                "type": "token",
+                                "content": current_chunk,
+                                "step": "streaming",
+                            }
+                            current_chunk = ""
+
+                            # Small delay for frontend rendering
+                            import asyncio
+
+                            await asyncio.sleep(
+                                0.015
+                            )  # 15ms delay for smooth animation
+
+                    # Save AI response
+                    await self.message_repository.create(
+                        chat_id=chat_id,
+                        role=MessageRole.ASSISTANT,
+                        content=response_text,
+                        metadata={"deduplicated": True, **response_metadata},
+                        correlation_id=correlation_id,
+                    )
+
+                    yield {
+                        "type": "complete",
+                        "content": "Deduplicated response completed",
+                        "metadata": {"deduplicated": True, **response_metadata},
+                        "step": "dedup_complete",
+                    }
+                    return
+
+        except Exception as e:
+            logger.warning(
+                f"Query deduplication failed, proceeding normally: {str(e)}",
+                extra={"correlation_id": correlation_id},
+            )
 
         try:
             # 1. Save user message to database
@@ -165,6 +258,80 @@ class ChatService:
                 correlation_id=correlation_id,
                 use_hybrid_search=True,
             )
+
+            # 2.5. Check for cached response with RAG context
+            yield {
+                "type": "status",
+                "content": "Checking response cache...",
+                "step": "cache_check",
+            }
+
+            cached_response = await self.response_cache.get_cached_response(
+                query=message_content,
+                context_docs=retrieved_docs,
+                correlation_id=correlation_id,
+            )
+
+            if cached_response:
+                cached_text, cached_metadata = cached_response
+                cache_used = True
+
+                logger.info(
+                    f"Using cached response",
+                    extra={
+                        "correlation_id": correlation_id,
+                        "response_length": len(cached_text),
+                        "context_docs": len(retrieved_docs),
+                    },
+                )
+
+                # Stream the cached response
+                yield {"type": "start", "content": "", "step": "streaming_cached"}
+
+                # Stream response in chunks for smooth frontend rendering
+                words = cached_text.split()
+                current_chunk = ""
+
+                for i, word in enumerate(words):
+                    current_chunk += word + (" " if i < len(words) - 1 else "")
+
+                    # Send chunk every 3-4 words for smooth streaming
+                    if len(current_chunk.split()) >= 3 or i == len(words) - 1:
+                        yield {
+                            "type": "token",
+                            "content": current_chunk,
+                            "step": "streaming",
+                        }
+                        current_chunk = ""
+
+                        # Small delay for frontend rendering
+                        import asyncio
+
+                        await asyncio.sleep(0.012)  # 12ms delay for cached responses
+
+                ai_response_content = cached_text
+                rag_metadata = {**cached_metadata, "cache_hit": True}
+
+                yield {"type": "end", "content": "", "step": "stream_complete"}
+
+                # Save AI response with cache metadata
+                await self.message_repository.create_with_rag_metadata(
+                    chat_id=chat_id,
+                    role=MessageRole.ASSISTANT,
+                    content=ai_response_content,
+                    retrieved_docs=retrieved_docs,
+                    retrieval_query=message_content,
+                    rag_metadata=rag_metadata,
+                    correlation_id=correlation_id,
+                )
+
+                yield {
+                    "type": "complete",
+                    "content": "Cached response completed",
+                    "metadata": rag_metadata,
+                    "step": "cache_complete",
+                }
+                return
 
             # Build context metadata
             rag_metadata = {
@@ -265,10 +432,69 @@ class ChatService:
                     },
                 )
 
+                # 6.5. Cache response for future queries (async, don't wait)
+                if not cache_used and ai_response_content.strip():
+                    try:
+                        # Determine if this is a common query (simple heuristic)
+                        common_keywords = [
+                            "balance",
+                            "transaction",
+                            "payment",
+                            "security",
+                            "account",
+                            "fee",
+                            "transfer",
+                        ]
+                        is_common = any(
+                            keyword in message_content.lower()
+                            for keyword in common_keywords
+                        )
+
+                        # Cache response asynchronously
+                        import asyncio
+
+                        asyncio.create_task(
+                            self.response_cache.cache_response(
+                                query=message_content,
+                                response=ai_response_content.strip(),
+                                metadata=rag_metadata,
+                                context_docs=retrieved_docs,
+                                is_common_query=is_common,
+                                correlation_id=correlation_id,
+                            )
+                        )
+
+                        # Notify query deduplication completion
+                        asyncio.create_task(
+                            self.response_cache.complete_query_processing(
+                                query=message_content,
+                                response=ai_response_content.strip(),
+                                metadata=rag_metadata,
+                                user_id=user_id_str,
+                                correlation_id=correlation_id,
+                            )
+                        )
+
+                        logger.debug(
+                            f"Response caching initiated",
+                            extra={
+                                "correlation_id": correlation_id,
+                                "is_common_query": is_common,
+                                "response_length": len(ai_response_content),
+                            },
+                        )
+
+                    except Exception as cache_error:
+                        # Don't fail the main flow if caching fails
+                        logger.warning(
+                            f"Response caching failed: {str(cache_error)}",
+                            extra={"correlation_id": correlation_id},
+                        )
+
             yield {
                 "type": "complete",
                 "content": "Message processing completed",
-                "metadata": rag_metadata,
+                "metadata": {**rag_metadata, "cache_used": cache_used},
                 "step": "complete",
             }
 
@@ -601,6 +827,21 @@ class ChatService:
 
         except Exception as e:
             health_status["checks"]["streaming_service"] = {
+                "status": "unhealthy",
+                "error": str(e),
+            }
+            health_status["status"] = "degraded"
+
+        try:
+            # Check response cache service health
+            cache_health = await self.response_cache.health_check(correlation_id)
+            health_status["checks"]["response_cache"] = cache_health["checks"]
+
+            if cache_health["status"] != "healthy":
+                health_status["status"] = "degraded"
+
+        except Exception as e:
+            health_status["checks"]["response_cache"] = {
                 "status": "unhealthy",
                 "error": str(e),
             }

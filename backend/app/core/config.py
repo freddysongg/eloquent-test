@@ -63,6 +63,10 @@ class Settings(BaseSettings):
         description="Clerk secret key for backend verification",
     )
     CLERK_JWT_TEMPLATE: str = "eloquent-ai"
+    CLERK_WEBHOOK_SECRET: Optional[str] = Field(
+        default=None,
+        description="Clerk webhook signing secret for secure webhook validation",
+    )
 
     # AI Services
     ANTHROPIC_API_KEY: str = Field(
@@ -154,8 +158,22 @@ class Settings(BaseSettings):
             # Return development default if not provided
             return "postgresql+asyncpg://eloquent:eloquent_password@localhost:5432/eloquentai_dev"  # pragma: allowlist secret
 
-        if not v.startswith(("postgresql://", "postgresql+asyncpg://")):
-            raise ValueError("DATABASE_URL must use PostgreSQL with asyncpg driver")
+        # Ensure async driver is used
+        if v.startswith("postgresql://") and not v.startswith("postgresql+asyncpg://"):
+            # Convert to async format
+            v = v.replace("postgresql://", "postgresql+asyncpg://", 1)
+            print(f"🔄 Auto-converted DATABASE_URL to use asyncpg driver")
+        elif not v.startswith("postgresql+asyncpg://"):
+            raise ValueError(
+                "DATABASE_URL must use PostgreSQL with asyncpg driver format: postgresql+asyncpg://"
+            )
+
+        # Additional validation: ensure URL structure is correct
+        if "://" not in v or v.count("@") != 1 or v.count("/") < 3:
+            raise ValueError(
+                "DATABASE_URL format is invalid. Expected: postgresql+asyncpg://user:pass@host:port/database"  # pragma: allowlist secret
+            )
+
         return v
 
     @field_validator("REDIS_URL", mode="before")

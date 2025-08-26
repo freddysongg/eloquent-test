@@ -116,13 +116,27 @@ class ClaudeClient:
                 start_time = asyncio.get_event_loop().time()
                 tokens = []
 
-                # Stream response tokens
+                # Stream response tokens with optimized chunking for frontend
                 async for chunk in stream:
                     if hasattr(chunk, "type") and chunk.type == "content_block_delta":
                         if hasattr(chunk, "delta") and hasattr(chunk.delta, "text"):
                             token = chunk.delta.text
-                            tokens.append(token)
-                            token_count += 1
+
+                            # Break long tokens into smaller chunks for smoother frontend rendering
+                            if (
+                                len(token) > 5
+                            ):  # For tokens longer than 5 chars, chunk them
+                                # Split by words to maintain readability
+                                words = token.split(" ")
+                                for i, word in enumerate(words):
+                                    if i > 0:  # Add space before subsequent words
+                                        tokens.append(" ")
+                                        token_count += 1
+                                    tokens.append(word)
+                                    token_count += 1
+                            else:
+                                tokens.append(token)
+                                token_count += 1
                     elif hasattr(chunk, "type") and chunk.type == "message_stop":
                         break
 
@@ -674,11 +688,24 @@ class ClaudeClient:
                     "and regulatory compliance. What would you like to know?"
                 )
 
-        # Simulate streaming by yielding tokens with small delays
+        # Simulate streaming by yielding tokens optimized for 10ms frontend intervals
         import re
 
-        words = re.split(r"(\s+)", mock_response)
+        # Split by words and punctuation for more granular streaming
+        words = re.split(r"(\s+|[.,!?;:])", mock_response)
+        words = [w for w in words if w.strip()]  # Remove empty strings
 
         for word in words:
-            await asyncio.sleep(0.01)  # Small delay to simulate streaming
-            yield word
+            # Further break down longer words for smoother animation
+            if len(word) > 8 and not word.isspace():
+                # Split long words into smaller chunks
+                chunk_size = 3
+                for i in range(0, len(word), chunk_size):
+                    chunk = word[i : i + chunk_size]
+                    yield chunk
+                    await asyncio.sleep(0.005)  # 5ms delay for sub-word chunks
+            else:
+                yield word
+                await asyncio.sleep(
+                    0.008
+                )  # 8ms delay to slightly under-pace the 10ms frontend

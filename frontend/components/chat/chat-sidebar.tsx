@@ -12,7 +12,6 @@ import {
 } from "@/components/ui/tooltip";
 import { LoadingSpinner } from "@/components/ui/loading-spinner";
 import { useChatManager } from "@/hooks/use-chat-manager";
-import { useAuth } from "@/components/providers/auth-provider";
 import { cn } from "@/lib/utils";
 
 interface ChatSidebarProps {
@@ -32,8 +31,6 @@ export function ChatSidebar({ onChatSelect, onNewChat }: ChatSidebarProps) {
     isAuthLoaded,
     generateChatTitle,
   } = useChatManager();
-
-  const { user } = useAuth();
 
   // Group chats by date for better organization
   const groupedChats = useMemo(() => {
@@ -117,39 +114,33 @@ export function ChatSidebar({ onChatSelect, onNewChat }: ChatSidebarProps) {
   return (
     <TooltipProvider>
       <div className="border-r bg-card h-full flex flex-col">
-        {/* Header */}
-        <div className="p-4 border-b">
-          <div className="flex items-center justify-between mb-3">
-            <h2 className="font-semibold text-lg">Chats</h2>
-            <Tooltip>
-              <TooltipTrigger asChild>
-                <Button
-                  variant="ghost"
-                  size="icon"
-                  onClick={handleNewChat}
-                  disabled={isLoading}
-                  className="h-8 w-8"
-                >
-                  <Plus className="h-4 w-4" />
-                </Button>
-              </TooltipTrigger>
-              <TooltipContent>Start new chat</TooltipContent>
-            </Tooltip>
-          </div>
+        {/* Header - Fixed to match main header height */}
+        <div className="border-b h-16 flex items-center justify-between px-4">
+          <h2 className="font-semibold text-lg">Chats</h2>
+          <Tooltip>
+            <TooltipTrigger asChild>
+              <Button
+                variant="ghost"
+                size="icon"
+                onClick={handleNewChat}
+                disabled={isLoading}
+                className="h-8 w-8"
+              >
+                <Plus className="h-4 w-4" />
+              </Button>
+            </TooltipTrigger>
+            <TooltipContent>Start new chat</TooltipContent>
+          </Tooltip>
+        </div>
 
-          {/* User info */}
-          {isSignedIn && user && (
-            <div className="text-xs text-muted-foreground">
-              {user.emailAddresses?.[0]?.emailAddress || "Signed in"}
-            </div>
-          )}
-
-          {!isSignedIn && (
+        {/* Sub-header with auth status */}
+        {!isSignedIn && (
+          <div className="px-4 py-2 border-b bg-muted/20">
             <div className="text-xs text-muted-foreground">
               Sign in for chat history
             </div>
-          )}
-        </div>
+          </div>
+        )}
 
         {/* Chat list */}
         <ScrollArea className="flex-1">

@@ -7,7 +7,8 @@ checks for protected endpoints.
 
 from typing import Optional
 
-from fastapi import Depends, HTTPException, Request
+import structlog
+from fastapi import Depends, HTTPException, Request, WebSocket
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -19,6 +20,9 @@ from app.repositories.user_repository import UserRepository
 
 # HTTP Bearer token scheme
 security = HTTPBearer(auto_error=False)
+
+# Initialize logger
+logger = structlog.get_logger(__name__)
 
 
 async def get_current_user(
@@ -191,3 +195,174 @@ def require_verified_user(user: User = Depends(require_active_user)) -> User:
         raise AuthorizationException("Email verification required")
 
     return user
+
+
+async def get_optional_current_user(
+    request: Request,
+    credentials: Optional[HTTPAuthorizationCredentials] = Depends(security),
+    db: AsyncSession = Depends(get_db_session),
+) -> Optional[User]:
+    """
+    Get current authenticated user from JWT token, allowing anonymous access.
+
+    This is a variant of get_current_user that doesn't raise an exception
+    when no authentication is provided, making it suitable for endpoints
+    that support both authenticated and anonymous users.
+
+    Args:
+        request: FastAPI request object
+        credentials: HTTP Bearer credentials (optional)
+        db: Database session
+
+    Returns:
+        Authenticated user or None for anonymous access
+    """
+    try:
+        return await get_current_user(request, credentials, db)
+    except AuthenticationException:
+        # Return None for anonymous access when authentication fails
+        return None
+
+
+async def get_websocket_user(
+    websocket: "WebSocket", correlation_id: str = ""
+) -> tuple[Optional[User], str]:
+    """
+    Authenticate WebSocket connection and return user or anonymous session.
+
+    Extracts JWT token from WebSocket headers or query parameters and validates it.
+    If no valid token is found, generates anonymous session identifier.
+
+    Args:
+        websocket: WebSocket connection instance
+        correlation_id: Request correlation ID for tracking
+
+    Returns:
+        Tuple of (authenticated_user, session_id) where user is None for anonymous
+
+    Raises:
+        WebSocketException: If authentication fails due to invalid token
+    """
+    from app.models.base import get_db_session
+
+    # Try to extract token from Authorization header
+    auth_header = websocket.headers.get("Authorization")
+    token = None
+
+    if auth_header and auth_header.startswith("Bearer "):
+        token = auth_header[7:]  # Remove "Bearer " prefix
+    else:
+        # Try to extract from query parameters as fallback
+        token = websocket.query_params.get("token")
+
+    if not token:
+        # No token provided - return anonymous session
+        session_id = websocket.query_params.get("session_id") or generate_session_id()
+        logger.info(
+            f"WebSocket anonymous connection",
+            extra={"correlation_id": correlation_id, "session_id": session_id},
+        )
+        return None, session_id
+
+    try:
+        # Get database session for user lookup
+        db = await get_db_session().__anext__()
+
+        try:
+            # First try to verify as Clerk token
+            try:
+                clerk_user = await verify_clerk_token(token)
+
+                # Get or create user from Clerk data
+                user_repo = UserRepository(db)
+                user = await user_repo.get_by_clerk_id(clerk_user.id)
+
+                if not user:
+                    # Create new user from Clerk data
+                    user = User(
+                        clerk_user_id=clerk_user.id,
+                        email=clerk_user.primary_email,
+                        first_name=clerk_user.first_name,
+                        last_name=clerk_user.last_name,
+                    )
+                    user = await user_repo.create(user)
+                else:
+                    # Update existing user with latest Clerk data
+                    user.update_from_clerk(clerk_user.dict())
+                    user = await user_repo.update(user)
+
+                logger.info(
+                    f"WebSocket authenticated via Clerk token",
+                    extra={
+                        "correlation_id": correlation_id,
+                        "user_id": str(user.id),
+                        "clerk_user_id": user.clerk_user_id,
+                    },
+                )
+
+                return user, str(user.id)
+
+            except HTTPException:
+                # If Clerk token fails, try JWT token
+                token_data = verify_token(token)
+
+                if token_data.clerk_user_id:
+                    user_repo = UserRepository(db)
+                    user = await user_repo.get_by_clerk_id(token_data.clerk_user_id)
+
+                    if not user:
+                        logger.warning(
+                            f"JWT token valid but user not found",
+                            extra={
+                                "correlation_id": correlation_id,
+                                "clerk_user_id": token_data.clerk_user_id,
+                            },
+                        )
+                        # Return anonymous session if user not found
+                        session_id = generate_session_id()
+                        return None, session_id
+
+                    if not user.is_active:
+                        logger.warning(
+                            f"WebSocket connection attempt by inactive user",
+                            extra={
+                                "correlation_id": correlation_id,
+                                "user_id": str(user.id),
+                            },
+                        )
+                        # Return anonymous session for inactive users
+                        session_id = generate_session_id()
+                        return None, session_id
+
+                    logger.info(
+                        f"WebSocket authenticated via JWT token",
+                        extra={
+                            "correlation_id": correlation_id,
+                            "user_id": str(user.id),
+                        },
+                    )
+
+                    return user, str(user.id)
+
+                # Token doesn't contain user info - return anonymous
+                session_id = generate_session_id()
+                return None, session_id
+
+        finally:
+            # Ensure database session is properly closed
+            try:
+                await db.close()
+            except Exception as close_error:
+                logger.warning(
+                    f"Failed to close WebSocket auth db session: {close_error}"
+                )
+
+    except Exception as e:
+        logger.error(
+            f"WebSocket authentication error: {str(e)}",
+            extra={"correlation_id": correlation_id},
+        )
+
+        # On authentication error, allow anonymous connection
+        session_id = generate_session_id()
+        return None, session_id

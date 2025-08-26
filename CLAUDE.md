@@ -34,7 +34,8 @@ Eloquent AI follows a **microservices with modular monolith approach** - single 
 **AI & Data Layer**
 - **Pinecone Vector DB**: Pre-configured with fintech FAQ data (17 records, cosine similarity, 1024 dims)
 - **Claude API**: Streaming responses with context injection
-- **Supabase PostgreSQL**: Chat history, user management with RLS
+- **PostgreSQL (Primary)**: Chat history, user management with RLS via SQLAlchemy 2.0 async
+- **DynamoDB (Optional)**: Sessions, rate limits, analytics, cache tables for enhanced performance
 - **Redis (ElastiCache)**: Caching, rate limiting, pub/sub messaging
 
 **Authentication & Security**
@@ -154,7 +155,7 @@ async def retrieve_context(query: str, top_k: int = 5) -> List[Dict[str, Any]]:
 - Have one source of truth for each piece of state
 - Make state changes explicit and traceable
 - Design for stateless RAG processing - use session IDs for chat coordination, avoid storing conversation data in server memory
-- Keep conversation history lightweight (text only) in Supabase PostgreSQL
+- Keep conversation history lightweight (text only) in PostgreSQL
 
 ### API Design Principles
 - RESTful design with consistent URL patterns
@@ -316,7 +317,7 @@ Since this is an architecture and planning project, there are no build commands 
 - Testing: `npm test`
 - Build: `npm run build`
 
-**Database (Supabase)**
+**Database (PostgreSQL + DynamoDB)**
 - Schema changes via migrations in `migrations/`
 - Row Level Security policies defined per table
 

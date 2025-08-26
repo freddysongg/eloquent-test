@@ -208,7 +208,10 @@ eloquentai/
 │   │   │   ├── MessageList.tsx         # Message display list
 │   │   │   ├── MessageInput.tsx        # Message input form
 │   │   │   ├── StreamingMessage.tsx    # Real-time message streaming
-│   │   │   └── ChatSidebar.tsx         # Chat navigation sidebar
+│   │   │   ├── ChatSidebar.tsx         # Legacy chat sidebar (deprecated)
+│   │   │   ├── CollapsibleSidebar.tsx  # Claude-inspired collapsible sidebar
+│   │   │   ├── MobileSidebar.tsx       # Legacy mobile sidebar (deprecated)
+│   │   │   └── README.md               # Collapsible sidebar documentation
 │   │   ├── ui/                         # Shadcn/ui components
 │   │   └── providers/                  # React context providers
 │   │       ├── AuthProvider.tsx        # Authentication context
@@ -217,7 +220,8 @@ eloquentai/
 │   ├── hooks/                          # Custom React hooks
 │   │   ├── useChat.ts                  # Chat management hook
 │   │   ├── useSocket.ts                # WebSocket connection hook
-│   │   └── useAuth.ts                  # Authentication hook
+│   │   ├── useAuth.ts                  # Authentication hook
+│   │   └── use-sidebar.ts              # Collapsible sidebar state management
 │   ├── lib/                            # Utility libraries
 │   │   ├── api/                        # API client setup
 │   │   ├── socket/                     # WebSocket utilities
@@ -226,6 +230,9 @@ eloquentai/
 │   │   ├── chatStore.ts                # Chat state management
 │   │   └── userStore.ts                # User state management
 │   ├── types/                          # TypeScript type definitions
+│   │   ├── chat.ts                     # Chat-related types
+│   │   ├── design-tokens.ts            # Design system types
+│   │   └── sidebar.ts                  # Collapsible sidebar types
 │   ├── tests/                          # Frontend tests
 │   ├── next.config.js                  # Next.js configuration
 │   ├── tailwind.config.ts              # Tailwind CSS config

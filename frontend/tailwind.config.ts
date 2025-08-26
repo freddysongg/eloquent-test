@@ -51,6 +51,73 @@ const config: Config = {
           DEFAULT: "hsl(var(--card))",
           foreground: "hsl(var(--card-foreground))",
         },
+        // Enhanced semantic color tokens
+        success: {
+          DEFAULT: "hsl(var(--success))",
+          foreground: "hsl(var(--success-foreground))",
+        },
+        warning: {
+          DEFAULT: "hsl(var(--warning))",
+          foreground: "hsl(var(--warning-foreground))",
+        },
+        info: {
+          DEFAULT: "hsl(var(--info))",
+          foreground: "hsl(var(--info-foreground))",
+        },
+        // Surface tokens
+        surface: {
+          DEFAULT: "hsl(var(--background))",
+          elevated: "hsl(var(--surface-elevated))",
+          hover: "hsl(var(--surface-hover))",
+          pressed: "hsl(var(--surface-pressed))",
+          disabled: "hsl(var(--surface-disabled))",
+        },
+        // Interactive tokens
+        interactive: {
+          DEFAULT: "hsl(var(--interactive-default))",
+          hover: "hsl(var(--interactive-hover))",
+          pressed: "hsl(var(--interactive-pressed))",
+          disabled: "hsl(var(--interactive-disabled))",
+        },
+        // Semantic text tokens
+        text: {
+          primary: "hsl(var(--text-primary))",
+          secondary: "hsl(var(--text-secondary))",
+          tertiary: "hsl(var(--text-tertiary))",
+          disabled: "hsl(var(--text-disabled))",
+          inverse: "hsl(var(--text-inverse))",
+        },
+        // Semantic border tokens
+        "border-semantic": {
+          primary: "hsl(var(--border-primary))",
+          secondary: "hsl(var(--border-secondary))",
+          hover: "hsl(var(--border-hover))",
+          focus: "hsl(var(--border-focus))",
+          disabled: "hsl(var(--border-disabled))",
+        },
+      },
+      backgroundImage: {
+        "gradient-primary": "var(--gradient-primary)",
+        "gradient-primary-hover": "var(--gradient-primary-hover)",
+        "gradient-primary-subtle": "var(--gradient-primary-subtle)",
+        "gradient-secondary": "var(--gradient-secondary)",
+        "gradient-secondary-hover": "var(--gradient-secondary-hover)",
+        "gradient-accent": "var(--gradient-accent)",
+        "gradient-accent-warm": "var(--gradient-accent-warm)",
+        "gradient-background": "var(--gradient-background)",
+        "gradient-background-subtle": "var(--gradient-background-subtle)",
+        "gradient-card": "var(--gradient-card)",
+        "gradient-card-hover": "var(--gradient-card-hover)",
+        "gradient-muted": "var(--gradient-muted)",
+        "gradient-muted-subtle": "var(--gradient-muted-subtle)",
+        "gradient-destructive": "var(--gradient-destructive)",
+        "gradient-destructive-hover": "var(--gradient-destructive-hover)",
+        "gradient-message-user": "var(--gradient-message-user)",
+        "gradient-message-ai": "var(--gradient-message-ai)",
+        "gradient-input-focus": "var(--gradient-input-focus)",
+        "gradient-vertical": "var(--gradient-vertical)",
+        "gradient-horizontal": "var(--gradient-horizontal)",
+        "gradient-radial": "var(--gradient-radial)",
       },
       borderRadius: {
         lg: "var(--radius)",
@@ -115,10 +182,21 @@ const config: Config = {
         "pulse-subtle": "pulse-subtle 2s ease-in-out infinite",
         typing: "typing 2s steps(100, end)",
         blink: "blink 1s step-end infinite",
+        // Semantic animation tokens
+        "duration-fast": "var(--duration-fast)",
+        "duration-normal": "var(--duration-normal)",
+        "duration-slow": "var(--duration-slow)",
       },
       spacing: {
         "18": "4.5rem",
         "88": "22rem",
+        // Semantic spacing tokens
+        "space-xs": "var(--space-xs)",
+        "space-sm": "var(--space-sm)",
+        "space-md": "var(--space-md)",
+        "space-lg": "var(--space-lg)",
+        "space-xl": "var(--space-xl)",
+        "space-2xl": "var(--space-2xl)",
       },
       fontSize: {
         xs: ["0.75rem", { lineHeight: "1rem" }],
@@ -141,6 +219,29 @@ const config: Config = {
       },
       maxWidth: {
         "8xl": "88rem",
+      },
+      // Enhanced shadow tokens
+      boxShadow: {
+        "semantic-sm": "var(--shadow-sm)",
+        "semantic-md": "var(--shadow-md)",
+        "semantic-lg": "var(--shadow-lg)",
+        "semantic-xl": "var(--shadow-xl)",
+      },
+      // Enhanced transition timing functions
+      transitionTimingFunction: {
+        "ease-linear": "var(--ease-linear)",
+        "ease-in-custom": "var(--ease-in)",
+        "ease-out-custom": "var(--ease-out)",
+        "ease-in-out-custom": "var(--ease-in-out)",
+        "ease-bounce": "var(--ease-bounce)",
+      },
+      // Enhanced transition durations
+      transitionDuration: {
+        instant: "var(--duration-instant)",
+        fast: "var(--duration-fast)",
+        normal: "var(--duration-normal)",
+        slow: "var(--duration-slow)",
+        slower: "var(--duration-slower)",
       },
     },
   },

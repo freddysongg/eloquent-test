@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "FastAPI backend for Eloquent AI chatbot with RAG pipeline"
 authors = ["Eloquent AI Team <dev@eloquentai.com>"]
 readme = "README.md"
+packages = [{include = "app"}]
 
 [tool.poetry.dependencies]
 python = "^3.11.0"
@@ -15,8 +16,9 @@ pydantic-settings = "^2.4.0"
 email-validator = "^2.2.0"
 sqlalchemy = "^2.0.32"
 asyncpg = "^0.29.0"
-psycopg2-binary = "^2.9.9"
 alembic = "^1.13.0"
+# Keep psycopg2-binary for migrations and sync operations
+psycopg2-binary = "^2.9.9"
 redis = "^5.0.8"
 httpx = "^0.27.0"
 python-jose = {extras = ["cryptography"], version = "^3.3.0"}

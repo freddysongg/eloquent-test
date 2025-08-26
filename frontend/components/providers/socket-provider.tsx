@@ -13,7 +13,7 @@ import {
 import { useAuth } from "@/components/providers/auth-provider";
 import { buildWebSocketUrl } from "@/lib/api";
 
-function sanitizeForLogging(data: any): any {
+function sanitizeForLogging(data: unknown): unknown {
   if (data === null || data === undefined) return data;
 
   if (typeof data !== "object") {
@@ -27,7 +27,7 @@ function sanitizeForLogging(data: any): any {
     return data.slice(0, 10).map(sanitizeForLogging); // Limit array size
   }
 
-  const sanitized: any = {};
+  const sanitized: Record<string, unknown> = {};
   for (const [key, value] of Object.entries(data)) {
     // Skip sensitive fields
     if (
@@ -60,7 +60,7 @@ interface SocketProviderProps {
 export function SocketProvider({ children }: SocketProviderProps) {
   const [socket, setSocket] = useState<WebSocket | null>(null);
   const [isConnected, setIsConnected] = useState(false);
-  const { user, isLoaded } = useAuth();
+  const { user, isLoaded, isSignedIn } = useAuth();
   const reconnectTimeoutRef = useRef<NodeJS.Timeout>();
   const reconnectAttemptsRef = useRef(0);
   const maxReconnectAttempts = 5;
@@ -101,10 +101,14 @@ export function SocketProvider({ children }: SocketProviderProps) {
       }
 
       const chatIdParam = currentChatIdRef.current || "default";
-      const userId = user?.id || "anonymous";
+      const userId = isSignedIn && user?.id ? user.id : "anonymous";
       const socketUrl = buildWebSocketUrl(chatIdParam, userId);
 
-      console.log("Connecting WebSocket to:", socketUrl);
+      console.log("Connecting WebSocket:", {
+        chatId: chatIdParam,
+        userId,
+        isAuthenticated: isSignedIn,
+      });
 
       try {
         const newSocket = new WebSocket(socketUrl);
@@ -177,7 +181,7 @@ export function SocketProvider({ children }: SocketProviderProps) {
         handleReconnect();
       }
     },
-    [socket, user, handleReconnect],
+    [socket, user, isSignedIn, handleReconnect],
   );
 
   // Update the ref whenever connect changes
@@ -206,7 +210,7 @@ export function SocketProvider({ children }: SocketProviderProps) {
     return () => {
       disconnect();
     };
-  }, [isLoaded, user?.id]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [isLoaded, isSignedIn, user?.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Cleanup on unmount
   useEffect(() => {
