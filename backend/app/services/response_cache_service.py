@@ -13,7 +13,7 @@ import time
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Set, Tuple
 
-from app.integrations.redis_client import get_redis_client
+from app.integrations.redis_client import RedisClient, get_redis_client
 
 logger = logging.getLogger(__name__)
 
@@ -23,7 +23,7 @@ class ResponseCacheService:
 
     def __init__(self) -> None:
         """Initialize response cache service."""
-        self.redis_client = None  # Will be initialized async
+        self.redis_client: Optional[RedisClient] = None  # Will be initialized async
         self.cache_stats = {
             "hits": 0,
             "misses": 0,
@@ -175,7 +175,7 @@ class ResponseCacheService:
                 await self.redis_client.set_json(
                     cache_key,
                     cached_data,
-                    ttl=self.default_ttl,
+                    expiration=self.default_ttl,
                     correlation_id=correlation_id,
                 )
 
@@ -254,7 +254,7 @@ class ResponseCacheService:
 
             # Cache the response
             success = await self.redis_client.set_json(
-                cache_key, cache_data, ttl=ttl, correlation_id=correlation_id
+                cache_key, cache_data, expiration=ttl, correlation_id=correlation_id
             )
 
             if success:
@@ -515,11 +515,15 @@ class ResponseCacheService:
             )
 
             # Get Redis cache info if available
-            redis_info = {}
+            redis_info: Dict[str, Any] = {}
             try:
                 await self._ensure_redis_client()
                 if self.redis_client:
-                    redis_info = await self.redis_client.get_cache_info(correlation_id)
+                    # Get basic Redis info - no specific cache info method available
+                    redis_info = {
+                        "connected": True,
+                        "mock_mode": self.redis_client._mock_mode,
+                    }
             except Exception:
                 pass  # Redis info not available
 
@@ -605,7 +609,7 @@ class ResponseCacheService:
         Returns:
             Health check results
         """
-        health_status = {
+        health_status: Dict[str, Any] = {
             "service": "response_cache_service",
             "status": "healthy",
             "checks": {},
@@ -615,9 +619,7 @@ class ResponseCacheService:
             # Check Redis connectivity
             await self._ensure_redis_client()
             redis_healthy = (
-                await self.redis_client.health_check(correlation_id)
-                if self.redis_client
-                else False
+                await self.redis_client.health_check() if self.redis_client else False
             )
             health_status["checks"]["redis"] = {
                 "status": "healthy" if redis_healthy else "unhealthy"

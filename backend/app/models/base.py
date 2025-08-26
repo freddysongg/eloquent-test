@@ -159,11 +159,23 @@ async def init_db() -> None:
             print(f"Connected to PostgreSQL: {version}")
 
             # Validate we're using asyncpg driver
-            driver_name = str(type(conn.sync_connection._connection.driver))
-            print(f"Using database driver: {driver_name}")
+            sync_conn = conn.sync_connection
+            if (
+                sync_conn is not None
+                and hasattr(sync_conn, "_connection")
+                and sync_conn._connection is not None
+            ):
+                driver_name = str(type(sync_conn._connection.driver))
+                print(f"Using database driver: {driver_name}")
 
-            if "asyncpg" not in driver_name.lower():
-                raise RuntimeError(f"Expected asyncpg driver, but got: {driver_name}")
+                if "asyncpg" not in driver_name.lower():
+                    raise RuntimeError(
+                        f"Expected asyncpg driver, but got: {driver_name}"
+                    )
+            else:
+                print(
+                    "Warning: Could not validate database driver - connection attributes not accessible"
+                )
 
             # Import all models to ensure they're registered
             from app.models.chat import Chat  # noqa: F401

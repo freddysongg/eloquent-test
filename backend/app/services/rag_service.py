@@ -10,10 +10,10 @@ import hashlib
 import json
 import logging
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, cast
 
 from app.integrations.pinecone_client import PineconeClient
-from app.integrations.redis_client import get_redis_client
+from app.integrations.redis_client import RedisClient, get_redis_client
 from app.services.hybrid_search_service import HybridSearchService
 
 logger = logging.getLogger(__name__)
@@ -32,7 +32,7 @@ class RAGService:
             max_context_tokens=8000,
         )
         self._index_initialized = False
-        self._redis_client = None
+        self._redis_client: Optional[RedisClient] = None
 
         # Caching configuration
         self.cache_ttl = 3600  # 1 hour cache for query results
@@ -40,7 +40,7 @@ class RAGService:
         self.embedding_cache_ttl = 7200  # 2 hour cache for embeddings
 
         # Performance tracking
-        self.retrieval_times = []
+        self.retrieval_times: List[float] = []
         self.cache_hit_count = 0
         self.cache_miss_count = 0
 
@@ -127,25 +127,27 @@ class RAGService:
             self.cache_miss_count += 1
 
             # Parallel execution of embedding generation and index initialization
-            tasks = []
-
-            # Task 1: Generate query embedding (with caching)
             embedding_task = self._get_cached_embedding(query, correlation_id)
-            tasks.append(embedding_task)
 
-            # Task 2: Initialize hybrid search index if needed
+            # Initialize hybrid search index if needed (separate task)
+            init_task = None
             if use_hybrid_search and not self._index_initialized:
                 init_task = self._initialize_hybrid_search_index(correlation_id)
-                tasks.append(init_task)
+
+            # Execute embedding task and init task in parallel if needed
+            if init_task:
+                results = await asyncio.gather(
+                    embedding_task, init_task, return_exceptions=True
+                )
+                query_embedding_result = results[0]
             else:
-                tasks.append(asyncio.create_task(self._dummy_task()))  # Placeholder
+                query_embedding_result = await embedding_task
 
-            # Execute tasks in parallel
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-            query_embedding = results[0]
+            if isinstance(query_embedding_result, Exception):
+                raise query_embedding_result
 
-            if isinstance(query_embedding, Exception):
-                raise query_embedding
+            # Type cast - we know it's List[float] after exception check
+            query_embedding = cast(List[float], query_embedding_result)
 
             # Search Pinecone for similar documents
             documents = await self.pinecone_client.search_documents(
@@ -315,11 +317,6 @@ class RAGService:
             )
             # Fallback to direct embedding generation
             return await self.pinecone_client.embed_text(text, correlation_id)
-
-    async def _dummy_task(self) -> None:
-        """Dummy task for parallel execution placeholder."""
-        await asyncio.sleep(0.001)
-        return None
 
     async def _cache_results(
         self,

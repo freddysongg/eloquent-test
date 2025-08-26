@@ -387,7 +387,7 @@ class ConnectionManager:
         healthy_connections = 0
         stale_connections = 0
 
-        avg_duration = 0
+        avg_duration = 0.0
         total_messages_sent = 0
         total_messages_received = 0
 

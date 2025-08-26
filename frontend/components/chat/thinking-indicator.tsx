@@ -7,10 +7,7 @@ interface ThinkingIndicatorProps {
   className?: string;
 }
 
-export function ThinkingIndicator({
-  message,
-  className,
-}: ThinkingIndicatorProps) {
+export function ThinkingIndicator({ className }: ThinkingIndicatorProps) {
   return (
     <div
       className={cn(

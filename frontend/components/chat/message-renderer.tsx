@@ -13,7 +13,7 @@ interface MessageRendererProps {
 interface CodeBlockProps {
   node?: any;
   inline?: boolean;
-  className?: string;
+  className?: string | undefined;
   children?: React.ReactNode;
 }
 
@@ -23,13 +23,7 @@ export function MessageRenderer({ content, className }: MessageRendererProps) {
       <ReactMarkdown
         components={{
           // Custom code block rendering with syntax highlighting
-          code({
-            node,
-            inline,
-            className,
-            children,
-            ...props
-          }: CodeBlockProps) {
+          code({ inline, className, children, ...props }: CodeBlockProps) {
             const match = /language-(\w+)/.exec(className || "");
             const language = match ? match[1] : "";
 
