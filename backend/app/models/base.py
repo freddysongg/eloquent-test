@@ -9,7 +9,7 @@ import uuid
 from datetime import datetime
 from typing import TYPE_CHECKING, Any, AsyncGenerator, Dict, Optional
 
-from sqlalchemy import DateTime, MetaData
+from sqlalchemy import DateTime, MetaData, text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.ext.declarative import as_declarative, declared_attr
@@ -20,6 +20,16 @@ if TYPE_CHECKING:
 
 from app.core.config import settings
 
+# Runtime validation: Ensure asyncpg is importable
+try:
+    import asyncpg
+
+    print(f"✅ Using asyncpg driver version: {asyncpg.__version__}")
+except ImportError as e:
+    print(f"❌ CRITICAL: asyncpg driver not available: {e}")
+    print("💡 Install asyncpg: pip install asyncpg")
+    raise ImportError("asyncpg driver is required for async database operations") from e
+
 # Create async database engine
 engine = create_async_engine(
     settings.DATABASE_URL,
@@ -28,6 +38,12 @@ engine = create_async_engine(
     max_overflow=settings.DATABASE_MAX_OVERFLOW,
     pool_pre_ping=True,
     pool_recycle=3600,
+    # Explicitly force asyncpg driver usage
+    connect_args={
+        "server_settings": {
+            "jit": "off",  # Disable JIT for stability in containers
+        }
+    },
 )
 
 # Create async session factory
@@ -134,15 +150,33 @@ async def get_db_session() -> AsyncGenerator[AsyncSession, None]:
 
 
 async def init_db() -> None:
-    """Initialize database tables."""
-    async with engine.begin() as conn:
-        # Import all models to ensure they're registered
-        from app.models.chat import Chat  # noqa: F401
-        from app.models.message import Message  # noqa: F401
-        from app.models.user import User  # noqa: F401
+    """Initialize database tables with connection validation."""
+    try:
+        async with engine.begin() as conn:
+            # Validate connection and driver
+            result = await conn.execute(text("SELECT version()"))
+            version = result.scalar()
+            print(f"Connected to PostgreSQL: {version}")
 
-        # Create all tables
-        await conn.run_sync(Base.metadata.create_all)
+            # Validate we're using asyncpg driver
+            driver_name = str(type(conn.sync_connection._connection.driver))
+            print(f"Using database driver: {driver_name}")
+
+            if "asyncpg" not in driver_name.lower():
+                raise RuntimeError(f"Expected asyncpg driver, but got: {driver_name}")
+
+            # Import all models to ensure they're registered
+            from app.models.chat import Chat  # noqa: F401
+            from app.models.message import Message  # noqa: F401
+            from app.models.user import User  # noqa: F401
+
+            # Create all tables
+            await conn.run_sync(Base.metadata.create_all)
+
+    except Exception as e:
+        print(f"Database initialization failed: {e}")
+        print(f"Database URL: {settings.DATABASE_URL}")
+        raise
 
 
 async def close_db() -> None:

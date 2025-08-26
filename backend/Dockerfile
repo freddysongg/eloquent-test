@@ -1,5 +1,5 @@
 # Multi-stage Docker build for FastAPI backend
-FROM python:3.12-slim as base
+FROM --platform=linux/amd64 python:3.12-slim as base
 
 # Set environment variables for optimal performance
 ENV PYTHONUNBUFFERED=1 \
@@ -33,39 +33,41 @@ RUN pip install --no-cache-dir --timeout=300 poetry==1.6.1
 # Copy dependency files first for better Docker layer caching
 COPY pyproject.toml poetry.lock ./
 
-# Configure poetry for production and install dependencies with timeout
+# Configure poetry for production and install dependencies
 RUN poetry config virtualenvs.create false \
     && poetry config installer.max-workers 10 \
     && poetry config installer.modern-installation false \
-    && poetry install --only=main --no-interaction --no-ansi --timeout=600 \
+    && poetry install --only=main --no-root --no-interaction --no-ansi \
     && rm -rf $POETRY_CACHE_DIR
 
 # Development stage
 FROM base as development
 
 # Install development dependencies
-RUN poetry install --no-interaction --no-ansi
+RUN poetry install --no-root --no-interaction --no-ansi
 
-# Copy application code
-COPY . .
+# Copy application code - fix directory structure
+COPY --chown=appuser:appuser app/ ./
+COPY --chown=appuser:appuser alembic/ ./alembic/
+COPY --chown=appuser:appuser alembic.ini ./
+COPY --chown=appuser:appuser gunicorn.conf.py ./
 
-# Change ownership to app user
-RUN chown -R appuser:appuser /app
+# Switch to non-root user for security
 USER appuser
 
 # Expose port
 EXPOSE 8000
 
 # Development command with reload
-CMD ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
 
 
 # Production stage - Optimized for App Runner
 FROM base as production
 
-# Copy application code excluding unnecessary files
-COPY --chown=appuser:appuser app/ ./app/
-COPY --chown=appuser:appuser alembic/ ./alembic/
+# Copy application code - fix directory structure to avoid /app/app/
+COPY --chown=appuser:appuser app/ ./
+COPY --chown=appuser:appuser migrations/ ./migrations/
 COPY --chown=appuser:appuser alembic.ini ./
 COPY --chown=appuser:appuser gunicorn.conf.py ./
 
@@ -85,5 +87,5 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
 # Expose port
 EXPOSE 8000
 
-# Production command optimized for App Runner (single worker for better resource management)
-CMD ["gunicorn", "app.main:app", "-w", "1", "-k", "uvicorn.workers.UvicornWorker", "-b", "0.0.0.0:8000", "--timeout", "120", "--keepalive", "2", "--max-requests", "1000", "--max-requests-jitter", "100", "--preload", "--access-logfile", "-", "--error-logfile", "-"]
+# Production command optimized for App Runner - fix module path
+CMD ["gunicorn", "main:app", "-w", "1", "-k", "uvicorn.workers.UvicornWorker", "-b", "0.0.0.0:8000", "--timeout", "120", "--keepalive", "2", "--max-requests", "1000", "--max-requests-jitter", "100", "--preload", "--access-logfile", "-", "--error-logfile", "-"]

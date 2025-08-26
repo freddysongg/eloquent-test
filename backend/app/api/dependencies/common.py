@@ -8,7 +8,7 @@ request validation, and correlation tracking.
 import time
 from typing import Optional, Tuple
 
-from fastapi import Depends, Header, Query, Request
+from fastapi import Depends, Header, Query, Request, WebSocket
 from pydantic import BaseModel, Field
 
 # from app.core.config import settings  # Unused import removed
@@ -185,3 +185,23 @@ async def get_list_params(
         Tuple of (pagination, sort) parameters
     """
     return pagination, sort
+
+
+def get_websocket_correlation_id(websocket: "WebSocket") -> str:
+    """
+    Get or generate correlation ID for WebSocket connections.
+
+    Args:
+        websocket: WebSocket connection instance
+
+    Returns:
+        Correlation ID for WebSocket connection tracking
+    """
+    # Try to get correlation ID from query params or headers
+    correlation_id = (
+        websocket.query_params.get("correlation_id")
+        or websocket.headers.get("x-correlation-id")
+        or generate_correlation_id()
+    )
+
+    return correlation_id

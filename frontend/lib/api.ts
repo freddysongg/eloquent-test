@@ -34,11 +34,16 @@ class ApiClient {
     };
 
     // Try to get Clerk auth token if available
-    if (typeof window !== "undefined" && window.Clerk) {
+    if (typeof window !== "undefined") {
       try {
-        const token = await window.Clerk.session?.getToken();
-        if (token) {
-          headers.Authorization = `Bearer ${token}`;
+        // Use the window.Clerk global or dynamic import
+        if (window.Clerk?.session) {
+          const token = await window.Clerk.session.getToken();
+          if (token) {
+            headers.Authorization = `Bearer ${token}`;
+          }
+        } else {
+          console.debug("Clerk not available, using anonymous access");
         }
       } catch (error) {
         console.warn("Failed to get auth token:", error);

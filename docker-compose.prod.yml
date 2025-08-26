@@ -65,6 +65,7 @@ services:
 
   # FastAPI Backend - Production
   backend:
+    platform: linux/amd64
     build:
       context: ./backend
       dockerfile: Dockerfile

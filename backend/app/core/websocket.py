@@ -7,7 +7,8 @@ with proper error handling and connection cleanup.
 
 import json
 import logging
-from typing import Dict, Optional, Set
+import time
+from typing import Any, Dict, Optional, Set
 from uuid import uuid4
 
 from fastapi import WebSocket, WebSocketDisconnect
@@ -28,7 +29,19 @@ class ConnectionManager:
         # Chat room to connection IDs mapping
         self.chat_connections: Dict[str, Set[str]] = {}
 
-        logger.info("WebSocket connection manager initialized")
+        # Performance monitoring
+        self.connection_metrics: Dict[str, Dict[str, Any]] = {}
+        self.last_ping_times: Dict[str, float] = {}
+        self.message_counts: Dict[str, int] = {}
+
+        # Health monitoring
+        self.failed_send_count = 0
+        self.total_send_count = 0
+        self.connection_start_time = time.time()
+
+        logger.info(
+            "WebSocket connection manager initialized with performance monitoring"
+        )
 
     async def connect(
         self,
@@ -51,6 +64,19 @@ class ConnectionManager:
 
         connection_id = str(uuid4())
         self.active_connections[connection_id] = websocket
+
+        # Initialize connection metrics
+        self.connection_metrics[connection_id] = {
+            "connected_at": time.time(),
+            "user_id": user_id,
+            "chat_id": chat_id,
+            "messages_sent": 0,
+            "messages_received": 0,
+            "last_activity": time.time(),
+            "ping_failures": 0,
+        }
+        self.message_counts[connection_id] = 0
+        self.last_ping_times[connection_id] = time.time()
 
         # Track user connections
         if user_id:
@@ -92,6 +118,25 @@ class ConnectionManager:
         """
         # Remove from active connections
         websocket = self.active_connections.pop(connection_id, None)
+
+        # Cleanup metrics
+        connection_metrics = self.connection_metrics.pop(connection_id, None)
+        self.message_counts.pop(connection_id, None)
+        self.last_ping_times.pop(connection_id, None)
+
+        # Log connection duration for monitoring
+        if connection_metrics:
+            duration = time.time() - connection_metrics["connected_at"]
+            logger.info(
+                f"Connection duration metrics",
+                extra={
+                    "connection_id": connection_id,
+                    "duration_seconds": round(duration, 2),
+                    "messages_sent": connection_metrics["messages_sent"],
+                    "messages_received": connection_metrics["messages_received"],
+                    "ping_failures": connection_metrics["ping_failures"],
+                },
+            )
 
         # Cleanup user connections
         if user_id and user_id in self.user_connections:
@@ -149,6 +194,14 @@ class ConnectionManager:
 
         try:
             if websocket.client_state == WebSocketState.CONNECTED:
+                # Update metrics before sending
+                self.total_send_count += 1
+                if connection_id in self.connection_metrics:
+                    self.connection_metrics[connection_id]["messages_sent"] += 1
+                    self.connection_metrics[connection_id][
+                        "last_activity"
+                    ] = time.time()
+
                 await websocket.send_text(message)
 
                 logger.debug(
@@ -157,6 +210,7 @@ class ConnectionManager:
                         "connection_id": connection_id,
                         "message_length": len(message),
                         "correlation_id": correlation_id,
+                        "total_sent": self.total_send_count,
                     },
                 )
                 return True
@@ -171,11 +225,22 @@ class ConnectionManager:
                 return False
 
         except Exception as e:
+            # Update failure metrics
+            self.failed_send_count += 1
+            if connection_id in self.connection_metrics:
+                self.connection_metrics[connection_id]["ping_failures"] += 1
+
             logger.error(
                 f"Failed to send personal message: {str(e)}",
                 extra={
                     "connection_id": connection_id,
                     "correlation_id": correlation_id,
+                    "failed_sends": self.failed_send_count,
+                    "success_rate": round(
+                        (self.total_send_count - self.failed_send_count)
+                        / max(self.total_send_count, 1),
+                        3,
+                    ),
                 },
             )
             # Clean up broken connection
@@ -312,6 +377,150 @@ class ConnectionManager:
     def get_chat_connection_count(self, chat_id: str) -> int:
         """Get number of connections in specific chat room."""
         return len(self.chat_connections.get(chat_id, set()))
+
+    def get_connection_health_metrics(self) -> Dict[str, Any]:
+        """Get comprehensive health metrics for all connections."""
+        current_time = time.time()
+        uptime = current_time - self.connection_start_time
+
+        active_count = len(self.active_connections)
+        healthy_connections = 0
+        stale_connections = 0
+
+        avg_duration = 0
+        total_messages_sent = 0
+        total_messages_received = 0
+
+        for conn_id, metrics in self.connection_metrics.items():
+            connection_age = current_time - metrics["connected_at"]
+            last_activity_age = current_time - metrics["last_activity"]
+
+            # Consider connection healthy if active within last 30 seconds
+            if last_activity_age < 30:
+                healthy_connections += 1
+            elif last_activity_age > 300:  # 5 minutes
+                stale_connections += 1
+
+            avg_duration += connection_age
+            total_messages_sent += metrics["messages_sent"]
+            total_messages_received += metrics["messages_received"]
+
+        if active_count > 0:
+            avg_duration /= active_count
+
+        success_rate = (self.total_send_count - self.failed_send_count) / max(
+            self.total_send_count, 1
+        )
+
+        return {
+            "websocket_health": {
+                "uptime_seconds": round(uptime, 2),
+                "total_connections": active_count,
+                "healthy_connections": healthy_connections,
+                "stale_connections": stale_connections,
+                "user_connections": len(self.user_connections),
+                "chat_connections": len(self.chat_connections),
+                "avg_connection_duration": round(avg_duration, 2),
+                "message_success_rate": round(success_rate, 3),
+                "total_messages_sent": self.total_send_count,
+                "failed_messages": self.failed_send_count,
+                "messages_per_connection": round(
+                    total_messages_sent / max(active_count, 1), 2
+                ),
+            }
+        }
+
+    async def optimize_streaming_delivery(
+        self, message: str, connection_id: str, chunk_delay_ms: float = 8.0
+    ) -> bool:
+        """
+        Send message with optimized chunking for smooth frontend rendering.
+
+        Args:
+            message: Message to send (typically streaming token)
+            connection_id: Target connection ID
+            chunk_delay_ms: Delay between chunks in milliseconds
+
+        Returns:
+            True if message sent successfully
+        """
+        websocket = self.active_connections.get(connection_id)
+        if not websocket or websocket.client_state != WebSocketState.CONNECTED:
+            return False
+
+        try:
+            # Parse JSON message to extract streaming content
+            try:
+                msg_data = json.loads(message)
+                content = msg_data.get("content", "")
+
+                # For streaming tokens, send immediately without additional chunking
+                # The Claude client already handles token chunking
+                if msg_data.get("type") == "token" and len(content) <= 10:
+                    await websocket.send_text(message)
+
+                    # Update metrics
+                    if connection_id in self.connection_metrics:
+                        self.connection_metrics[connection_id]["messages_sent"] += 1
+                        self.connection_metrics[connection_id][
+                            "last_activity"
+                        ] = time.time()
+
+                    return True
+                else:
+                    # For longer content, send as-is (status messages, etc.)
+                    await websocket.send_text(message)
+
+                    if connection_id in self.connection_metrics:
+                        self.connection_metrics[connection_id]["messages_sent"] += 1
+                        self.connection_metrics[connection_id][
+                            "last_activity"
+                        ] = time.time()
+
+                    return True
+
+            except json.JSONDecodeError:
+                # Not JSON, send as plain text
+                await websocket.send_text(message)
+
+                if connection_id in self.connection_metrics:
+                    self.connection_metrics[connection_id]["messages_sent"] += 1
+                    self.connection_metrics[connection_id][
+                        "last_activity"
+                    ] = time.time()
+
+                return True
+
+        except Exception as e:
+            logger.error(
+                f"Optimized streaming delivery failed: {str(e)}",
+                extra={"connection_id": connection_id},
+            )
+            return False
+
+    async def cleanup_stale_connections(self, max_idle_minutes: int = 10) -> int:
+        """Clean up connections that have been idle for too long."""
+        current_time = time.time()
+        stale_connections = []
+
+        for conn_id, metrics in self.connection_metrics.items():
+            last_activity = metrics["last_activity"]
+            idle_time = (current_time - last_activity) / 60  # Convert to minutes
+
+            if idle_time > max_idle_minutes:
+                stale_connections.append(
+                    (conn_id, metrics.get("user_id"), metrics.get("chat_id"))
+                )
+
+        # Clean up stale connections
+        for conn_id, user_id, chat_id in stale_connections:
+            logger.info(
+                f"Cleaning up stale connection",
+                extra={"connection_id": conn_id, "idle_minutes": idle_time},
+            )
+            await self.disconnect(conn_id, user_id, chat_id)
+
+        return len(stale_connections)
 
 
 # Global connection manager instance

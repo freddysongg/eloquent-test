@@ -6,12 +6,13 @@
 "use client";
 
 import { useState, useEffect, useCallback } from "react";
-import { apiClient } from "@/lib/api";
+import { useApiClient } from "@/hooks/use-api-client";
 import { Chat, Message, ChatState } from "@/types/chat";
 import { useAuth } from "@/components/providers/auth-provider";
 
 export function useChatManager() {
   const { isSignedIn, isLoaded } = useAuth();
+  const apiClient = useApiClient();
 
   const [state, setState] = useState<ChatState>({
     chats: [],
@@ -33,13 +34,12 @@ export function useChatManager() {
 
       const response = await apiClient.listChats();
 
-      if (response.error) {
-        throw new Error(response.error);
-      }
+      // Handle API response format
+      const chats = response.data?.chats || [];
 
       setState((prev) => ({
         ...prev,
-        chats: response.data.chats,
+        chats,
         isLoading: false,
       }));
     } catch (error) {
@@ -50,7 +50,7 @@ export function useChatManager() {
         isLoading: false,
       }));
     }
-  }, [isLoaded]);
+  }, [isLoaded, apiClient]);
 
   /**
    * Create a new chat conversation
@@ -61,13 +61,17 @@ export function useChatManager() {
 
       const response = await apiClient.createChat();
 
-      if (response.error) {
-        throw new Error(response.error);
+      // Handle API response format
+      const chatId = response.data?.chat_id;
+      const createdAt = response.data?.created_at || new Date().toISOString();
+
+      if (!chatId) {
+        throw new Error("No chat ID returned from server");
       }
 
       const newChat: Chat = {
-        id: response.data.chat_id,
-        created_at: response.data.created_at,
+        id: chatId,
+        created_at: createdAt,
         message_count: 0,
       };
 
@@ -89,7 +93,7 @@ export function useChatManager() {
       }));
       return null;
     }
-  }, []);
+  }, [apiClient]);
 
   /**
    * Select and load a chat conversation
@@ -103,14 +107,13 @@ export function useChatManager() {
 
         const response = await apiClient.getChat(chatId);
 
-        if (response.error) {
-          throw new Error(response.error);
-        }
+        // Handle API response format
+        const messages = response.data?.messages || [];
 
         setState((prev) => ({
           ...prev,
           currentChatId: chatId,
-          messages: response.data.messages,
+          messages,
           isLoading: false,
         }));
       } catch (error) {
@@ -122,7 +125,7 @@ export function useChatManager() {
         }));
       }
     },
-    [state.currentChatId],
+    [state.currentChatId, apiClient],
   );
 
   /**
@@ -161,16 +164,17 @@ export function useChatManager() {
           stream: false,
         });
 
-        if (response.error) {
-          throw new Error(response.error);
-        }
+        // Handle API response format
+        const responseText = response.data?.response;
+        const messageId =
+          response.data?.message_id || `assistant-${Date.now()}`;
 
         // Add assistant response
-        if (response.data.response) {
+        if (responseText) {
           const assistantMessage: Message = {
-            id: response.data.message_id,
+            id: messageId,
             role: "assistant",
-            content: response.data.response,
+            content: responseText,
             timestamp: new Date(),
           };
 
@@ -209,7 +213,7 @@ export function useChatManager() {
         }));
       }
     },
-    [state.currentChatId, createNewChat],
+    [state.currentChatId, createNewChat, apiClient],
   );
 
   /**

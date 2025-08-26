@@ -241,15 +241,38 @@ async def logging_middleware(
 @app.websocket("/ws/{chat_id}")
 async def websocket_endpoint(websocket: WebSocket, chat_id: str) -> None:
     """
-    WebSocket endpoint for real-time chat functionality.
+    WebSocket endpoint for real-time chat functionality with JWT authentication.
+
+    Supports both authenticated and anonymous users:
+    - Authenticated: Pass JWT token via Authorization header or query param
+    - Anonymous: Connect without token, use session_id for identification
 
     Args:
         websocket: WebSocket connection
         chat_id: Chat room identifier
     """
-    # Extract user info from query params or headers
-    user_id = websocket.query_params.get("user_id")
-    correlation_id = websocket.query_params.get("correlation_id", "")
+    from app.api.dependencies.auth import get_websocket_user
+    from app.api.dependencies.common import get_websocket_correlation_id
+
+    # Get correlation ID for tracking
+    correlation_id = get_websocket_correlation_id(websocket)
+
+    # Authenticate user from JWT token or allow anonymous access
+    user, session_id = await get_websocket_user(websocket, correlation_id)
+
+    # Extract user_id for connection tracking
+    user_id = str(user.id) if user else None
+
+    logger.info(
+        f"WebSocket connection request",
+        extra={
+            "chat_id": chat_id,
+            "user_id": user_id,
+            "session_id": session_id,
+            "correlation_id": correlation_id,
+            "authenticated": user is not None,
+        },
+    )
 
     await websocket_handler(websocket, user_id, chat_id, correlation_id)
 

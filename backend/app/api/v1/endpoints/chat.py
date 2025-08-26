@@ -6,10 +6,11 @@ Claude API integration, context retrieval from Pinecone, and comprehensive
 error handling with resilience patterns for production stability.
 """
 
+import asyncio
 import json
 import logging
 import time
-from typing import AsyncGenerator, Optional, Union
+from typing import Any, AsyncGenerator, Dict, Optional, Union
 from uuid import UUID, uuid4
 
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException
@@ -17,7 +18,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.api.dependencies.auth import get_current_user
+from app.api.dependencies.auth import get_current_user, get_optional_current_user
 from app.api.dependencies.common import get_correlation_id
 from app.core.monitoring import track_error, track_health_metrics
 from app.core.resilience import resilience_manager
@@ -315,13 +316,21 @@ async def send_message(
                 try:
                     rag_metadata = {}
 
-                    # Process message through ChatService with full RAG pipeline
-                    async for chunk in chat_service.process_message(
+                    # Process message through ChatService with backpressure management
+                    message_processor = chat_service.process_message(
                         chat_id=chat_uuid,
                         message_content=request.message,
                         user=current_user,
                         correlation_id=correlation_id,
-                    ):
+                    )
+
+                    # Implement backpressure by buffering chunks
+                    chunk_buffer = []
+                    buffer_size = 10  # Buffer up to 10 chunks
+                    last_send_time = time.time()
+                    min_send_interval = 0.008  # 8ms minimum interval
+
+                    async for chunk in message_processor:
                         try:
                             # Extract metadata for final response
                             if chunk.get("type") == "complete" and chunk.get(
@@ -329,55 +338,93 @@ async def send_message(
                             ):
                                 rag_metadata = chunk["metadata"]
 
-                            # Send chunk to WebSocket connections with error handling
-                            if (
-                                connection_manager.get_chat_connection_count(chat_id)
-                                > 0
-                            ):
-                                try:
-                                    # Convert chunk dict to JSON string for WebSocket transmission
-                                    chunk_json = (
-                                        json.dumps(chunk)
-                                        if isinstance(chunk, dict)
-                                        else str(chunk)
-                                    )
-                                    await connection_manager.send_to_chat(
-                                        chunk_json,
-                                        chat_id,
-                                        correlation_id=correlation_id,
-                                    )
-                                except Exception as ws_error:
-                                    logger.warning(
-                                        f"WebSocket send failed: {str(ws_error)}",
-                                        extra={
-                                            "chat_id": chat_id,
-                                            "correlation_id": correlation_id,
-                                        },
-                                    )
-                                    track_error(
-                                        "websocket",
-                                        "send_failure",
-                                        str(ws_error),
-                                        correlation_id,
-                                        chat_id=chat_id,
-                                    )
+                            # Add chunk to buffer for backpressure management
+                            chunk_buffer.append(chunk)
 
-                            # Format chunk for HTTP streaming
-                            chunk_data = {
-                                "type": chunk.get("type", "token"),
-                                "content": chunk.get("content", ""),
-                                "step": chunk.get("step"),
-                            }
+                            # Process buffer when full or on critical chunks
+                            should_flush = (
+                                len(chunk_buffer) >= buffer_size
+                                or chunk.get("type") in ["complete", "error", "end"]
+                                or (time.time() - last_send_time)
+                                > min_send_interval * 2
+                            )
 
-                            # Include metadata in appropriate chunks
-                            if chunk.get("metadata"):
-                                chunk_data["metadata"] = chunk["metadata"]
+                            if should_flush:
+                                # Send buffered chunks to WebSocket connections
+                                if (
+                                    connection_manager.get_chat_connection_count(
+                                        chat_id
+                                    )
+                                    > 0
+                                ):
+                                    for buffered_chunk in chunk_buffer:
+                                        try:
+                                            chunk_json = (
+                                                json.dumps(buffered_chunk)
+                                                if isinstance(buffered_chunk, dict)
+                                                else str(buffered_chunk)
+                                            )
 
-                            # Track streaming metrics
-                            if chunk.get("type") == "token":
-                                tokens_streamed += 1
+                                            # Rate limit WebSocket sends
+                                            current_time = time.time()
+                                            if (
+                                                current_time - last_send_time
+                                                < min_send_interval
+                                            ):
+                                                await asyncio.sleep(
+                                                    min_send_interval
+                                                    - (current_time - last_send_time)
+                                                )
 
-                            yield f"data: {chunk_data}\n\n"
+                                            sent_count = (
+                                                await connection_manager.send_to_chat(
+                                                    chunk_json,
+                                                    chat_id,
+                                                    correlation_id=correlation_id,
+                                                )
+                                            )
+                                            last_send_time = time.time()
+
+                                        except Exception as ws_error:
+                                            logger.warning(
+                                                f"WebSocket send failed (buffered): {str(ws_error)}",
+                                                extra={
+                                                    "chat_id": chat_id,
+                                                    "correlation_id": correlation_id,
+                                                    "buffer_size": len(chunk_buffer),
+                                                },
+                                            )
+                                            track_error(
+                                                "websocket",
+                                                "send_failure_buffered",
+                                                str(ws_error),
+                                                correlation_id,
+                                                chat_id=chat_id,
+                                            )
+
+                                # Process buffer for HTTP streaming
+                                for buffered_chunk in chunk_buffer:
+                                    # Format chunk for HTTP streaming
+                                    chunk_data = {
+                                        "type": buffered_chunk.get("type", "token"),
+                                        "content": buffered_chunk.get("content", ""),
+                                        "step": buffered_chunk.get("step"),
+                                    }
+
+                                    # Include metadata in appropriate chunks
+                                    if buffered_chunk.get("metadata"):
+                                        chunk_data["metadata"] = buffered_chunk[
+                                            "metadata"
+                                        ]
+
+                                    # Track streaming metrics
+                                    if buffered_chunk.get("type") == "token":
+                                        tokens_streamed += 1
+
+                                    yield f"data: {chunk_data}\n\n"
+
+                                # Clear buffer after processing
+                                chunk_buffer.clear()
 
                         except Exception as chunk_error:
                             streaming_errors += 1
@@ -387,12 +434,56 @@ async def send_message(
                                     "chat_id": chat_id,
                                     "correlation_id": correlation_id,
                                     "chunk_type": chunk.get("type", "unknown"),
+                                    "buffer_size": len(chunk_buffer),
+                                    "streaming_errors": streaming_errors,
                                 },
                             )
 
-                            # Continue streaming despite chunk errors
-                            if streaming_errors > 10:  # Too many errors, stop streaming
+                            # Implement progressive error handling
+                            if streaming_errors > 5:
+                                # Clear buffer and send error notification on high error count
+                                chunk_buffer.clear()
+
+                                error_chunk = {
+                                    "type": "warning",
+                                    "content": "Experiencing connection issues, attempting recovery...",
+                                    "step": "error_recovery",
+                                    "recoverable": True,
+                                }
+                                yield f"data: {error_chunk}\n\n"
+
+                                # Pause briefly to allow recovery
+                                await asyncio.sleep(0.1)
+
+                            if streaming_errors > 15:  # Critical error threshold
+                                logger.error(
+                                    f"Critical streaming error threshold reached",
+                                    extra={
+                                        "chat_id": chat_id,
+                                        "correlation_id": correlation_id,
+                                        "streaming_errors": streaming_errors,
+                                    },
+                                )
                                 break
+
+                    # Flush any remaining chunks in buffer
+                    if chunk_buffer:
+                        logger.info(
+                            f"Flushing remaining {len(chunk_buffer)} chunks from buffer"
+                        )
+                        for buffered_chunk in chunk_buffer:
+                            chunk_data = {
+                                "type": buffered_chunk.get("type", "token"),
+                                "content": buffered_chunk.get("content", ""),
+                                "step": buffered_chunk.get("step"),
+                            }
+                            if buffered_chunk.get("metadata"):
+                                chunk_data["metadata"] = buffered_chunk["metadata"]
+
+                            if buffered_chunk.get("type") == "token":
+                                tokens_streamed += 1
+
+                            yield f"data: {chunk_data}\n\n"
 
                     # Send final completion with metadata
                     final_chunk = {
@@ -402,17 +493,27 @@ async def send_message(
                     }
                     yield f"data: {final_chunk}\n\n"
 
-                    # Track successful streaming metrics
+                    # Track successful streaming metrics including WebSocket performance
                     duration = time.time() - start_time
+                    ws_health = connection_manager.get_connection_health_metrics()
+
                     track_health_metrics(
                         "chat_streaming",
                         "healthy",
                         duration * 1000,  # Convert to milliseconds
                         streaming_errors / max(tokens_streamed, 1),
-                        60.0,  # Rough RPM estimate
+                        (
+                            tokens_streamed / duration if duration > 0 else 0
+                        ),  # Tokens per second
                         "closed",  # Streaming doesn't use circuit breaker directly
                         tokens_streamed=tokens_streamed,
                         streaming_errors=streaming_errors,
+                        websocket_connections=ws_health["websocket_health"][
+                            "total_connections"
+                        ],
+                        websocket_success_rate=ws_health["websocket_health"][
+                            "message_success_rate"
+                        ],
                     )
 
                 except Exception as e:
@@ -620,6 +721,29 @@ async def health_check(
             )
             health_data["resilience"] = {"error": str(resilience_error)}
 
+        # WebSocket connection health
+        try:
+            ws_health = connection_manager.get_connection_health_metrics()
+            health_data["websocket"] = ws_health["websocket_health"]
+
+            # Adjust status based on WebSocket health
+            if (
+                ws_health["websocket_health"]["message_success_rate"] < 0.95
+            ):  # Less than 95% success
+                if health_data["status"] == "healthy":
+                    health_data["status"] = "degraded"
+
+            if ws_health["websocket_health"]["stale_connections"] > 0:
+                if health_data["status"] == "healthy":
+                    health_data["status"] = "degraded"
+
+        except Exception as ws_error:
+            logger.warning(
+                f"Failed to get WebSocket health: {str(ws_error)}",
+                extra={"correlation_id": correlation_id},
+            )
+            health_data["websocket"] = {"error": str(ws_error)}
+
         # Error monitoring status
         try:
             from app.core.monitoring import error_monitor
@@ -816,6 +940,299 @@ async def reset_circuit_breaker(
             "error": {
                 "message": f"Failed to reset circuit breaker for {service_name}",
                 "code": "CIRCUIT_BREAKER_RESET_ERROR",
+                "correlation_id": correlation_id,
+            },
+        }
+
+
+@router.get("/performance/streaming")
+async def get_streaming_performance(
+    correlation_id: str = Depends(get_correlation_id),
+) -> dict:
+    """
+    Get detailed streaming performance metrics.
+
+    Provides comprehensive metrics for streaming chat performance including
+    WebSocket connection health, token delivery rates, and optimization suggestions.
+    """
+    try:
+        # Get WebSocket health metrics
+        ws_health = connection_manager.get_connection_health_metrics()
+
+        # Get recent streaming performance from monitoring
+        from app.core.monitoring import error_monitor
+
+        streaming_summary = error_monitor.get_service_summary(
+            "chat_streaming", 15
+        )  # Last 15 minutes
+
+        # Calculate performance metrics
+        performance_data = {
+            "streaming_health": {
+                "websocket": ws_health["websocket_health"],
+                "streaming_service": {
+                    "requests_processed": streaming_summary.get("total_requests", 0),
+                    "error_rate": streaming_summary.get("error_rate", 0.0),
+                    "avg_response_time_ms": streaming_summary.get(
+                        "avg_response_time", 0
+                    ),
+                    "tokens_per_second_avg": streaming_summary.get("avg_throughput", 0),
+                },
+                "optimization_suggestions": [],
+            }
+        }
+
+        # Add optimization suggestions based on performance metrics
+        suggestions = []
+
+        if ws_health["websocket_health"]["message_success_rate"] < 0.98:
+            suggestions.append(
+                "Consider WebSocket connection optimization - success rate below 98%"
+            )
+
+        if ws_health["websocket_health"]["stale_connections"] > 0:
+            suggestions.append(
+                "Clean up stale WebSocket connections for better performance"
+            )
+
+        if streaming_summary.get("avg_response_time", 0) > 500:
+            suggestions.append(
+                "Streaming response time > 500ms - consider optimization"
+            )
+
+        if streaming_summary.get("error_rate", 0) > 0.02:
+            suggestions.append("Streaming error rate > 2% - investigate error patterns")
+
+        if len(suggestions) == 0:
+            suggestions.append("Performance within optimal parameters")
+
+        performance_data["streaming_health"]["optimization_suggestions"] = suggestions
+
+        # Connection distribution metrics
+        performance_data["streaming_health"]["connection_distribution"] = {
+            "total_active": ws_health["websocket_health"]["total_connections"],
+            "healthy_connections": ws_health["websocket_health"]["healthy_connections"],
+            "stale_connections": ws_health["websocket_health"]["stale_connections"],
+            "user_sessions": ws_health["websocket_health"]["user_connections"],
+            "active_chats": ws_health["websocket_health"]["chat_connections"],
+        }
+
+        return {
+            "data": performance_data,
+            "error": None,
+            "correlation_id": correlation_id,
+            "timestamp": time.time(),
+        }
+
+    except Exception as e:
+        logger.error(
+            f"Streaming performance check failed: {str(e)}",
+            extra={"correlation_id": correlation_id},
+        )
+
+        return {
+            "data": None,
+            "error": {
+                "message": "Failed to get streaming performance metrics",
+                "code": "STREAMING_PERFORMANCE_ERROR",
+                "correlation_id": correlation_id,
+            },
+        }
+
+
+@router.get("/cache/stats")
+async def get_cache_statistics(
+    current_user: Optional[User] = Depends(get_optional_current_user),
+    db: AsyncSession = Depends(get_db_session),
+    correlation_id: str = Depends(get_correlation_id),
+) -> Dict[str, Any]:
+    """
+    Get response cache performance statistics.
+
+    Returns cache hit rates, deduplication metrics, and performance data
+    for monitoring and optimization purposes.
+    """
+    logger.info(
+        f"Getting cache statistics",
+        extra={
+            "correlation_id": correlation_id,
+            "user_id": str(current_user.id) if current_user else "anonymous",
+        },
+    )
+
+    try:
+        # Initialize services
+        chat_service = ChatService(db)
+
+        # Get comprehensive cache statistics
+        cache_stats = await chat_service.response_cache.get_cache_stats(correlation_id)
+
+        # Get common query patterns
+        common_queries = await chat_service.response_cache.identify_common_queries(
+            min_frequency=3,
+            time_window_hours=24,
+            correlation_id=correlation_id,
+        )
+
+        # Calculate performance metrics
+        performance_metrics = {
+            "cache_efficiency": {
+                "hit_rate": cache_stats.get("hit_rate", 0.0),
+                "total_requests": cache_stats.get("cache_hits", 0)
+                + cache_stats.get("cache_misses", 0),
+                "hits": cache_stats.get("cache_hits", 0),
+                "misses": cache_stats.get("cache_misses", 0),
+                "cached_responses": cache_stats.get("cached_responses", 0),
+            },
+            "deduplication_metrics": {
+                "deduplicated_queries": cache_stats.get("deduplicated_queries", 0),
+                "pending_queries": cache_stats.get("pending_queries", 0),
+                "stored_results": cache_stats.get("stored_results", 0),
+            },
+            "common_query_patterns": [
+                {
+                    "pattern": query["pattern"],
+                    "frequency": query["frequency"],
+                    "estimated_savings": f"{query['frequency'] * 2.5:.1f}s",  # Estimate 2.5s saved per cache hit
+                }
+                for query in common_queries[:10]  # Top 10 patterns
+            ],
+            "redis_performance": cache_stats.get("redis_info", {}),
+        }
+
+        # Add optimization recommendations
+        recommendations = []
+
+        if cache_stats.get("hit_rate", 0) < 0.15:
+            recommendations.append(
+                "Cache hit rate below 15% - consider expanding cache coverage"
+            )
+        elif cache_stats.get("hit_rate", 0) > 0.4:
+            recommendations.append("Excellent cache performance - hit rate above 40%")
+
+        if cache_stats.get("deduplicated_queries", 0) > cache_stats.get(
+            "cache_hits", 1
+        ):
+            recommendations.append(
+                "High deduplication rate - users asking similar questions simultaneously"
+            )
+
+        if len(common_queries) > 20:
+            recommendations.append(
+                "Many common query patterns - consider pre-caching responses"
+            )
+
+        if len(recommendations) == 0:
+            recommendations.append("Cache performance within normal parameters")
+
+        performance_metrics["optimization_recommendations"] = recommendations
+
+        # System health indicators
+        cache_health = await chat_service.response_cache.health_check(correlation_id)
+        performance_metrics["system_health"] = {
+            "cache_service_status": cache_health.get("status", "unknown"),
+            "redis_connectivity": (
+                "healthy"
+                if cache_health.get("checks", {}).get("redis", {}).get("status")
+                == "healthy"
+                else "degraded"
+            ),
+            "deduplication_system": (
+                "healthy"
+                if cache_stats.get("pending_queries", 0) < 100
+                else "overloaded"
+            ),
+        }
+
+        return {
+            "data": performance_metrics,
+            "error": None,
+            "correlation_id": correlation_id,
+            "timestamp": time.time(),
+        }
+
+    except Exception as e:
+        logger.error(
+            f"Failed to get cache statistics: {str(e)}",
+            extra={"correlation_id": correlation_id},
+        )
+
+        return {
+            "data": None,
+            "error": {
+                "message": "Failed to retrieve cache statistics",
+                "code": "CACHE_STATS_ERROR",
+                "correlation_id": correlation_id,
+            },
+        }
+
+
+@router.post("/cache/invalidate")
+async def invalidate_response_cache(
+    pattern: Optional[str] = None,
+    current_user: Optional[User] = Depends(get_optional_current_user),
+    db: AsyncSession = Depends(get_db_session),
+    correlation_id: str = Depends(get_correlation_id),
+) -> Dict[str, Any]:
+    """
+    Invalidate response cache entries by pattern.
+
+    Args:
+        pattern: Optional pattern to match cache keys (default: invalidate all)
+
+    This endpoint allows administrators to clear cached responses when
+    content updates require cache invalidation.
+    """
+    logger.info(
+        f"Invalidating response cache",
+        extra={
+            "correlation_id": correlation_id,
+            "user_id": str(current_user.id) if current_user else "anonymous",
+            "pattern": pattern,
+        },
+    )
+
+    try:
+        # Initialize services
+        chat_service = ChatService(db)
+
+        # Invalidate cache entries
+        invalidated_count = await chat_service.response_cache.invalidate_cache(
+            pattern=pattern,
+            correlation_id=correlation_id,
+        )
+
+        logger.info(
+            f"Cache invalidation completed",
+            extra={
+                "correlation_id": correlation_id,
+                "pattern": pattern,
+                "invalidated_count": invalidated_count,
+            },
+        )
+
+        return {
+            "data": {
+                "invalidated_count": invalidated_count,
+                "pattern": pattern or "all",
+                "status": "completed",
+            },
+            "error": None,
+            "correlation_id": correlation_id,
+            "timestamp": time.time(),
+        }
+
+    except Exception as e:
+        logger.error(
+            f"Cache invalidation failed: {str(e)}",
+            extra={"correlation_id": correlation_id, "pattern": pattern},
+        )
+
+        return {
+            "data": None,
+            "error": {
+                "message": "Failed to invalidate cache",
+                "code": "CACHE_INVALIDATION_ERROR",
                 "correlation_id": correlation_id,
             },
         }
