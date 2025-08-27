@@ -28,17 +28,69 @@ class RedisClient:
         self.pool: Optional[redis.ConnectionPool] = None
 
         try:
-            self.pool = redis.ConnectionPool.from_url(
-                settings.REDIS_URL,
-                decode_responses=True,
-                max_connections=20,
-                retry_on_timeout=True,
-                socket_keepalive=True,
-                socket_keepalive_options={},
-                health_check_interval=30,
-            )
+            # Parse Redis URL to extract connection details
+            from urllib.parse import urlparse
 
-            self.redis = redis.Redis(connection_pool=self.pool)
+            parsed_url = urlparse(settings.REDIS_URL)
+
+            # ElastiCache-optimized connection parameters
+            connection_kwargs = {
+                "decode_responses": True,
+                "max_connections": 20,
+                "retry_on_timeout": True,
+                "socket_keepalive": True,
+                "socket_keepalive_options": {},
+                "health_check_interval": 30,
+                "socket_connect_timeout": 5,
+                "socket_timeout": 5,
+            }
+
+            # Add password if present in URL or settings
+            if parsed_url.password or settings.REDIS_PASSWORD:
+                connection_kwargs["password"] = (
+                    parsed_url.password or settings.REDIS_PASSWORD
+                )
+
+            # Add SSL configuration for ElastiCache
+            if settings.REDIS_SSL or parsed_url.scheme == "rediss":
+                connection_kwargs["ssl"] = True
+                connection_kwargs["ssl_cert_reqs"] = (
+                    None  # ElastiCache uses managed certificates
+                )
+
+            # Check if cluster mode is enabled
+            if settings.REDIS_CLUSTER_MODE:
+                # Use Redis Cluster client for ElastiCache cluster mode
+                from redis.cluster import RedisCluster
+
+                cluster_kwargs = {
+                    "startup_nodes": [
+                        {"host": parsed_url.hostname, "port": parsed_url.port or 6379}
+                    ],
+                    "decode_responses": connection_kwargs["decode_responses"],
+                    "socket_connect_timeout": connection_kwargs[
+                        "socket_connect_timeout"
+                    ],
+                    "socket_timeout": connection_kwargs["socket_timeout"],
+                    "retry_on_timeout": connection_kwargs["retry_on_timeout"],
+                    "skip_full_coverage_check": True,  # Required for ElastiCache
+                }
+
+                if connection_kwargs.get("password"):
+                    cluster_kwargs["password"] = connection_kwargs["password"]
+
+                if connection_kwargs.get("ssl"):
+                    cluster_kwargs["ssl"] = connection_kwargs["ssl"]
+                    cluster_kwargs["ssl_cert_reqs"] = connection_kwargs["ssl_cert_reqs"]
+
+                self.redis = RedisCluster(**cluster_kwargs)
+                self.pool = None  # Cluster mode doesn't use connection pool
+            else:
+                # Standard Redis client for single-node or replication group
+                self.pool = redis.ConnectionPool.from_url(
+                    settings.REDIS_URL, **connection_kwargs
+                )
+                self.redis = redis.Redis(connection_pool=self.pool)
 
             logger.info("Redis client initialized successfully")
 
@@ -544,8 +596,14 @@ class RedisClient:
 
         try:
             if self.redis:
+                # Close Redis connection (works for both standard and cluster mode)
                 await self.redis.close()
-            logger.info("Redis connection pool closed")
+
+            if self.pool:
+                # Close connection pool if available (not used in cluster mode)
+                await self.pool.disconnect()
+
+            logger.info("Redis connections closed successfully")
 
         except Exception as e:
             logger.error(f"Error closing Redis connection: {str(e)}")

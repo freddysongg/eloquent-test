@@ -46,8 +46,8 @@ FROM base as development
 # Install development dependencies
 RUN poetry install --no-root --no-interaction --no-ansi
 
-# Copy application code - fix directory structure
-COPY --chown=appuser:appuser app/ ./
+# Copy application code maintaining proper structure
+COPY --chown=appuser:appuser app/ ./app/
 COPY --chown=appuser:appuser alembic/ ./alembic/
 COPY --chown=appuser:appuser alembic.ini ./
 COPY --chown=appuser:appuser gunicorn.conf.py ./
@@ -65,8 +65,8 @@ CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
 # Production stage - Optimized for App Runner
 FROM base as production
 
-# Copy application code - fix directory structure to avoid /app/app/
-COPY --chown=appuser:appuser app/ ./
+# Copy application code maintaining proper structure
+COPY --chown=appuser:appuser app/ ./app/
 COPY --chown=appuser:appuser migrations/ ./migrations/
 COPY --chown=appuser:appuser alembic.ini ./
 COPY --chown=appuser:appuser gunicorn.conf.py ./
@@ -87,5 +87,5 @@ HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
 # Expose port
 EXPOSE 8000
 
-# Production command optimized for App Runner - fix module path
-CMD ["gunicorn", "main:app", "-w", "1", "-k", "uvicorn.workers.UvicornWorker", "-b", "0.0.0.0:8000", "--timeout", "120", "--keepalive", "2", "--max-requests", "1000", "--max-requests-jitter", "100", "--preload", "--access-logfile", "-", "--error-logfile", "-"]
+# Production command optimized for App Runner - use config file
+CMD ["gunicorn", "app.main:app", "-c", "gunicorn.conf.py"]

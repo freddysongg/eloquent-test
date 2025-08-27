@@ -5,10 +5,11 @@ Handles environment variables, validation, and application settings
 with proper type hints and secure defaults.
 """
 
+import os
 import secrets
-from typing import List, Optional, Union
+from typing import Annotated, List, Optional, Union
 
-from pydantic import Field, field_validator
+from pydantic import Field, PlainValidator, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -43,6 +44,13 @@ class Settings(BaseSettings):
     REDIS_URL: str = "redis://localhost:6379/0"
     REDIS_PASSWORD: Optional[str] = None
     REDIS_DB: int = 0
+    REDIS_SSL: bool = Field(
+        default=False,
+        description="Enable SSL/TLS for Redis connections (required for ElastiCache in-transit encryption)",
+    )
+    REDIS_CLUSTER_MODE: bool = Field(
+        default=False, description="Enable Redis cluster mode for ElastiCache cluster"
+    )
 
     # Authentication & Security
     SECRET_KEY: str = Field(
@@ -111,7 +119,26 @@ class Settings(BaseSettings):
     LOG_FILE: str = "logs/app.log"
 
     # CORS Settings
-    CORS_ORIGINS: List[str] = Field(
+    @staticmethod
+    def parse_cors_origins(v: Union[str, List[str]]) -> List[str]:
+        """Parse CORS origins from string or list."""
+        if isinstance(v, str):
+            # Try to parse as JSON first
+            try:
+                import json
+
+                parsed = json.loads(v)
+                if isinstance(parsed, list):
+                    return parsed
+            except (json.JSONDecodeError, ValueError):
+                pass
+            # Fall back to comma-separated parsing
+            return [origin.strip() for origin in v.split(",")]
+        elif isinstance(v, list):
+            return v
+        raise ValueError("CORS_ORIGINS must be a string or list")
+
+    CORS_ORIGINS: Annotated[List[str], PlainValidator(parse_cors_origins)] = Field(
         default=[
             "http://localhost:3000",  # Local development
             "https://eloquent-test.vercel.app",  # Production frontend
@@ -142,14 +169,22 @@ class Settings(BaseSettings):
     RESPONSE_TIMEOUT_SECONDS: int = 60
     MAX_CHAT_HISTORY_LENGTH: int = 50
 
-    @field_validator("CORS_ORIGINS", mode="before")
-    def parse_cors_origins(cls, v: Union[str, List[str]]) -> List[str]:
-        """Parse CORS origins from string or list."""
-        if isinstance(v, str):
-            return [origin.strip() for origin in v.split(",")]
-        elif isinstance(v, list):
-            return v
-        raise ValueError("CORS_ORIGINS must be a string or list")
+    # AWS Configuration
+    AWS_REGION: str = Field(
+        default="us-east-1", description="AWS region for services like Secrets Manager"
+    )
+    AWS_SECRETS_ENABLED: bool = Field(
+        default=True, description="Enable AWS Secrets Manager integration"
+    )
+
+    # Secrets Manager Configuration
+    APP_SECRETS_NAME: Optional[str] = Field(
+        default=None,
+        description="AWS Secrets Manager secret name for application credentials",
+    )
+    JWT_SECRETS_NAME: Optional[str] = Field(
+        default=None, description="AWS Secrets Manager secret name for JWT secrets"
+    )
 
     @field_validator("DATABASE_URL", mode="before")
     def validate_database_url(cls, v: str) -> str:
@@ -188,6 +223,65 @@ class Settings(BaseSettings):
     def database_url_sync(self) -> str:
         """Get synchronous database URL for migrations."""
         return self.DATABASE_URL.replace("+asyncpg", "")
+
+    def is_production(self) -> bool:
+        """Check if running in production environment."""
+        return self.ENVIRONMENT.lower() == "production"
+
+    def is_aws_environment(self) -> bool:
+        """Check if running in AWS environment (ECS/Fargate)."""
+        # Check for ECS metadata endpoint or AWS environment variables
+        return (
+            os.getenv("AWS_EXECUTION_ENV") is not None
+            or os.getenv("ECS_CONTAINER_METADATA_URI") is not None
+            or os.getenv("ECS_CONTAINER_METADATA_URI_V4") is not None
+            or self.is_production()
+        )
+
+    async def load_aws_secrets(self) -> None:
+        """Load secrets from AWS Secrets Manager if enabled and in AWS environment."""
+        if not self.AWS_SECRETS_ENABLED or not self.is_aws_environment():
+            return
+
+        try:
+            from app.integrations.secrets_manager import get_secrets_client
+
+            secrets_client = get_secrets_client()
+
+            # Load application credentials if configured
+            if self.APP_SECRETS_NAME:
+                app_secrets = await secrets_client.get_secret(self.APP_SECRETS_NAME)
+
+                # Update configuration with secrets
+                if "database_url" in app_secrets:
+                    self.DATABASE_URL = app_secrets["database_url"]
+                if "anthropic_api_key" in app_secrets:
+                    self.ANTHROPIC_API_KEY = app_secrets["anthropic_api_key"]
+                if "pinecone_api_key" in app_secrets:
+                    self.PINECONE_API_KEY = app_secrets["pinecone_api_key"]
+                if "clerk_secret_key" in app_secrets:
+                    self.CLERK_SECRET_KEY = app_secrets["clerk_secret_key"]
+                if "redis_url" in app_secrets:
+                    self.REDIS_URL = app_secrets["redis_url"]
+
+            # Load JWT secrets if configured
+            if self.JWT_SECRETS_NAME:
+                jwt_secrets = await secrets_client.get_secret(self.JWT_SECRETS_NAME)
+                if "password" in jwt_secrets:
+                    self.SECRET_KEY = jwt_secrets["password"]
+
+        except Exception as e:
+            # Log error but don't fail startup in case of secrets issues
+            import logging
+
+            logger = logging.getLogger(__name__)
+            logger.error(f"Failed to load AWS secrets: {str(e)}")
+
+            # In production, this might be a critical error
+            if self.is_production():
+                logger.critical("AWS Secrets Manager failed in production environment")
+                # In a real production setup, you might want to raise here
+                # raise e
 
 
 # Global settings instance
