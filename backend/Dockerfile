@@ -46,8 +46,8 @@ FROM base as development
 # Install development dependencies
 RUN poetry install --no-root --no-interaction --no-ansi
 
-# Copy application code maintaining proper structure
-COPY --chown=appuser:appuser app/ ./app/
+# Copy application code - fix directory structure
+COPY --chown=appuser:appuser app/ ./
 COPY --chown=appuser:appuser alembic/ ./alembic/
 COPY --chown=appuser:appuser alembic.ini ./
 COPY --chown=appuser:appuser gunicorn.conf.py ./
@@ -65,8 +65,8 @@ CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8000", "--reload"]
 # Production stage - Optimized for App Runner
 FROM base as production
 
-# Copy application code maintaining proper structure
-COPY --chown=appuser:appuser app/ ./app/
+# Copy application code - fix directory structure to avoid /app/app/
+COPY --chown=appuser:appuser app/ ./
 COPY --chown=appuser:appuser migrations/ ./migrations/
 COPY --chown=appuser:appuser alembic.ini ./
 COPY --chown=appuser:appuser gunicorn.conf.py ./
