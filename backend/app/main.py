@@ -8,7 +8,7 @@ CORS configuration, and API routing with WebSocket support.
 import logging
 import time
 from contextlib import asynccontextmanager
-from typing import AsyncGenerator, Awaitable, Callable
+from typing import Any, AsyncGenerator, Awaitable, Callable, Dict
 
 from fastapi import FastAPI, Request, Response, WebSocket
 from fastapi.exceptions import RequestValidationError
@@ -17,6 +17,7 @@ from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.middleware.trustedhost import TrustedHostMiddleware
 from fastapi.responses import JSONResponse
 from prometheus_client import Counter, Histogram, generate_latest
+from sqlalchemy import text
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.api.v1.router import api_router
@@ -32,7 +33,7 @@ from app.core.security import SecurityHeaders
 from app.core.websocket import websocket_handler
 from app.integrations.redis_client import close_redis, get_redis_client
 from app.middleware.rate_limiting import RateLimitMiddleware
-from app.models.base import close_db, init_db
+from app.models.base import close_db, engine, init_db
 
 # Configure logging
 logging.basicConfig(
@@ -68,6 +69,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     logger.info("Starting Eloquent AI Backend...")
 
     try:
+        # Load AWS secrets if in AWS environment
+        await settings.load_aws_secrets()
+        logger.info("AWS secrets loaded successfully")
+
         # Initialize database
         await init_db()
         logger.info("Database initialized successfully")
@@ -293,13 +298,59 @@ async def health_check() -> dict:
     Returns:
         Health status information
     """
-    return {
+    health_status: Dict[str, Any] = {
         "status": "healthy",
         "app_name": settings.APP_NAME,
         "version": settings.APP_VERSION,
         "environment": settings.ENVIRONMENT,
         "timestamp": time.time(),
+        "services": {},
     }
+
+    try:
+        # Check database connectivity
+        async with engine.begin() as conn:
+            await conn.execute(text("SELECT 1"))
+            health_status["services"]["database"] = {
+                "status": "healthy",
+                "type": "postgresql",
+            }
+    except Exception as e:
+        health_status["services"]["database"] = {"status": "unhealthy", "error": str(e)}
+        health_status["status"] = "degraded"
+
+    try:
+        # Check Redis connectivity
+        redis_client = await get_redis_client()
+        redis_healthy = await redis_client.health_check()
+        health_status["services"]["redis"] = {
+            "status": "healthy" if redis_healthy else "unhealthy",
+            "type": "redis",
+        }
+        if not redis_healthy:
+            health_status["status"] = "degraded"
+    except Exception as e:
+        health_status["services"]["redis"] = {"status": "unhealthy", "error": str(e)}
+        health_status["status"] = "degraded"
+
+    # Check AWS Secrets Manager if enabled
+    if settings.AWS_SECRETS_ENABLED and settings.is_aws_environment():
+        try:
+            from app.integrations.secrets_manager import get_secrets_client
+
+            secrets_client = get_secrets_client()
+            secrets_health = await secrets_client.health_check()
+            health_status["services"]["secrets_manager"] = secrets_health
+            if secrets_health["status"] != "healthy":
+                health_status["status"] = "degraded"
+        except Exception as e:
+            health_status["services"]["secrets_manager"] = {
+                "status": "unhealthy",
+                "error": str(e),
+            }
+            health_status["status"] = "degraded"
+
+    return health_status
 
 
 # Metrics endpoint for Prometheus

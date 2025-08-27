@@ -167,6 +167,7 @@ tfplan*
 
 # Deployment files with sensitive data
 .env.deployment
+.env.production
 **/secrets.tfvars
 
 terraform/docs/
