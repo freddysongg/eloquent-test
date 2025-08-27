@@ -5,7 +5,7 @@
 # ========================================
 # Stage 1: Base Python Image
 # ========================================
-FROM python:3.11-slim as base
+FROM python:3.13-slim as base
 
 # Set environment variables
 ENV PYTHONUNBUFFERED=1 \
@@ -42,7 +42,7 @@ RUN poetry install --only=main --no-root && rm -rf $POETRY_CACHE_DIR
 # ========================================
 # Stage 3: Final Runtime Image
 # ========================================
-FROM python:3.11-slim as runtime
+FROM python:3.13-slim as runtime
 
 # Set environment variables for production
 ENV PYTHONUNBUFFERED=1 \

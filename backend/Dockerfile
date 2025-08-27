@@ -1,5 +1,5 @@
 # Multi-stage Docker build for FastAPI backend
-FROM --platform=linux/amd64 python:3.12-slim as base
+FROM --platform=linux/amd64 python:3.13-slim as base
 
 # Set environment variables for optimal performance
 ENV PYTHONUNBUFFERED=1 \
